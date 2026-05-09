@@ -1,4 +1,21 @@
-# Claude Execute — Automated Crypto Trading
+# Claude Execute — Binance USD-M Futures Lead Trader
+
+> **Fork notice.** This fork specialises the upstream multi-exchange bot for the Binance USD-M
+> Futures Lead Trader Copy Trading API. The bot now executes on Binance Futures (not BitGet),
+> enforces Single-Asset Mode at startup, validates the dynamic Lead Trader symbol whitelist
+> on every run, throttles orders to 20/10s, applies an internal drawdown circuit-breaker, and
+> writes AUD basis columns into `trades.csv` for ATO compliance. A backtest harness
+> (`backtest.js`) ships alongside. See [PHASE-0-NOTES.md](PHASE-0-NOTES.md) for the closing of
+> the eleven Lead-Trader-specific gaps.
+>
+> **Quick start:** copy `.env.example` → `.env`, fill in `BINANCE_API_KEY` /
+> `BINANCE_SECRET_KEY`, leave `PAPER_TRADING=true`, run `node bot.js`. For testnet, set
+> `BINANCE_FAPI_BASE_URL=https://testnet.binancefuture.com`. For Lead Trader strict mode
+> (Phase 3+), set `BINANCE_REQUIRE_LEAD_TRADER=true`.
+>
+> The original upstream README content follows below for reference.
+
+---
 
 A lightweight automation layer that reads your TradingView chart, evaluates your strategy, and places trades on your exchange — with strict safety checks and full tax-ready logging.
 

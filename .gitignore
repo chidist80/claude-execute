@@ -1,4 +1,6 @@
 .env
 *.log
 safety-check-log.json
+equity-history.json
+backtest-*.csv
 node_modules/

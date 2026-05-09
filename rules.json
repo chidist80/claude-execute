@@ -34,7 +34,7 @@
 
   "exit_rules": [
     "Exit when RSI(3) crosses back above 50 (for longs) or below 50 (for shorts)",
-    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts",
+    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts — implemented as a Binance STOP_MARKET order placed alongside the entry and re-priced bot-side each candle (Binance Lead Trader API does NOT support trailing stops; the bot manages the trailing logic itself)",
     "Take profit at next VWAP touch or EMA(8) cross"
   ],
 
@@ -45,6 +45,17 @@
     "Do not trade if price is more than 1.5% away from VWAP — overextended",
     "Paper trade first — validate this strategy on your specific asset before going live"
   ],
+
+  "risk_limits": {
+    "max_leverage": 5,
+    "max_open_positions": 1,
+    "stop_loss_pct": 0.3,
+    "max_daily_loss_pct": 3.0,
+    "max_7d_drawdown_pct": 10.0,
+    "halt_on_trip": true,
+    "trailing_stop_allowed": false,
+    "_notes": "Pre-empts Binance auto-cap (5x at AUM ≥ $100K) and trips well before Binance's 24h auto-cooling rule (-20% / 7d MDD at AUM ≥ $500K). trailing_stop_allowed is false because Binance Lead Trader Copy Trading bans the TRAILING_STOP_MARKET order type — the bot manages stops itself."
+  },
 
   "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes."
 }
