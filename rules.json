@@ -57,5 +57,13 @@
     "_notes": "Pre-empts Binance auto-cap (5x at AUM ≥ $100K) and trips well before Binance's 24h auto-cooling rule (-20% / 7d MDD at AUM ≥ $500K). trailing_stop_allowed is false because Binance Lead Trader Copy Trading bans the TRAILING_STOP_MARKET order type — the bot manages stops itself."
   },
 
-  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes."
+  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes.",
+
+  "_phase_1_status": {
+    "exit_gate_met": false,
+    "validated_at": "2026-05-10",
+    "summary": "12-month backtest is unprofitable across BTC/ETH/SOL on 1h and 4h. Phase 0's favourable 6-month BTC 4h subwindow does NOT generalise. See STRATEGY.md for the full comparison matrix and recommended next steps.",
+    "do_not_deploy_with_real_capital": true,
+    "best_lead": "funding-mean-revert on SOLUSDT 1h passes all four gate criteria but only as a single-symbol edge — not the multi-symbol generalisation the gate requires"
+  }
 }
