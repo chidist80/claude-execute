@@ -575,12 +575,62 @@ async function getOpenPositions() {
 
 // ─── Binance Futures Order Placement (Gap 1) ──────────────────────────────
 
+// Cache exchangeInfo per symbol for the lifetime of the process. Public
+// endpoint, no auth, ~50ms. Filters change rarely (hours-to-days cadence) so
+// even a per-cron-invocation fetch is cheap; we cache to avoid the call when
+// placing multiple orders in one run.
+const _symbolFiltersCache = new Map();
+
+async function getSymbolFilters(symbol) {
+  if (_symbolFiltersCache.has(symbol)) return _symbolFiltersCache.get(symbol);
+  const url = `${CONFIG.binance.fapiBase}/fapi/v1/exchangeInfo`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`exchangeInfo HTTP ${res.status}`);
+  const data = await res.json();
+  const sym = data.symbols.find((s) => s.symbol === symbol);
+  if (!sym) throw new Error(`Symbol ${symbol} not in exchangeInfo`);
+  const lotSize = sym.filters.find((f) => f.filterType === "LOT_SIZE");
+  const minNotional = sym.filters.find((f) => f.filterType === "MIN_NOTIONAL");
+  const filters = {
+    stepSize: parseFloat(lotSize.stepSize),
+    minQty: parseFloat(lotSize.minQty),
+    maxQty: parseFloat(lotSize.maxQty),
+    minNotional: parseFloat(minNotional?.notional || "0"),
+    quantityPrecision: sym.quantityPrecision,
+    pricePrecision: sym.pricePrecision,
+  };
+  _symbolFiltersCache.set(symbol, filters);
+  return filters;
+}
+
+// Floor `qty` to the nearest multiple of `stepSize`, preserving exactly the
+// number of decimals dictated by the step (so the wire format matches Binance's
+// expectations: e.g. step 0.001 → "0.037", step 1 → "19").
+function roundToStep(qty, stepSize) {
+  const decimals = stepSize >= 1 ? 0 : Math.max(0, -Math.floor(Math.log10(stepSize)));
+  const rounded = Math.floor(qty / stepSize) * stepSize;
+  return rounded.toFixed(decimals);
+}
+
 async function placeFuturesOrder(symbol, side, sizeUSD, price) {
   // side: "BUY" (open long, or close short) | "SELL" (open short, or close long)
-  // Quantity is in base asset. Round to a sensible precision; per-symbol tickSize/stepSize
-  // is enforced by Binance — we use 3 decimals as a safe default for BTCUSDT/ETHUSDT.
-  // Production-grade rounding requires /fapi/v1/exchangeInfo lookup; that's a Phase 1 deliverable.
-  const quantity = (sizeUSD / price).toFixed(3);
+  const filters = await getSymbolFilters(symbol);
+  const rawQty = sizeUSD / price;
+  const quantity = roundToStep(rawQty, filters.stepSize);
+  const qtyNum = parseFloat(quantity);
+  if (qtyNum < filters.minQty) {
+    throw new Error(
+      `Computed quantity ${quantity} ${symbol} (from $${sizeUSD.toFixed(2)} / $${price.toFixed(2)}) ` +
+        `is below minQty ${filters.minQty}. Increase PORTFOLIO_VALUE_USD, RISK_PER_TRADE_PCT, ` +
+        `or MAX_TRADE_SIZE_USD — or pick a smaller-priced symbol.`,
+    );
+  }
+  const notional = qtyNum * price;
+  if (notional < filters.minNotional) {
+    throw new Error(
+      `Computed notional $${notional.toFixed(2)} is below ${symbol} minNotional $${filters.minNotional}.`,
+    );
+  }
 
   await throttleOrderSlot();
 
@@ -904,6 +954,33 @@ async function run() {
   const sizingInfo = computeTradeSize(rules);
   const tradeSize = sizingInfo.tradeSize;
 
+  // Precision pre-flight: catch sub-minimum quantities BEFORE going live.
+  // Runs in paper mode too so the 30-day forward test surfaces config issues
+  // before they bite at first real-money order.
+  let precisionWarning = null;
+  try {
+    const filters = await getSymbolFilters(CONFIG.symbol);
+    const rawQty = tradeSize / price;
+    const rounded = parseFloat(roundToStep(rawQty, filters.stepSize));
+    if (rounded < filters.minQty) {
+      precisionWarning =
+        `Quantity ${rounded} ${CONFIG.symbol} is below minQty ${filters.minQty}. ` +
+        `Increase PORTFOLIO_VALUE_USD or RISK_PER_TRADE_PCT, or pick a smaller-priced symbol.`;
+    } else if (rounded * price < filters.minNotional) {
+      precisionWarning =
+        `Notional $${(rounded * price).toFixed(2)} is below ${CONFIG.symbol} minNotional $${filters.minNotional}.`;
+    } else {
+      console.log(
+        `  ✅ Quantity check: ${rounded} ${CONFIG.symbol} (step ${filters.stepSize}, minQty ${filters.minQty})`,
+      );
+    }
+    if (precisionWarning) {
+      console.log(`  ⚠️  PRECISION: ${precisionWarning}`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  exchangeInfo lookup failed: ${err.message}`);
+  }
+
   const audRate = await getUsdToAudRate();
 
   console.log("\n── Decision ─────────────────────────────────────────────\n");
@@ -919,6 +996,7 @@ async function run() {
     allPass,
     tradeSize,
     sizing: sizingInfo,
+    precisionWarning,
     audRate,
     orderPlaced: false,
     orderId: null,

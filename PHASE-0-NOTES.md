@@ -57,13 +57,24 @@ that is unsafe to automate.
    Private Lead portfolio, fund $1000 (earn the second $1K with another 4 weeks of clean
    Phase 3 results — see STRATEGY.md capital sizing rationale), generate a Copy Trading
    API key with that IP whitelisted, flip `BINANCE_REQUIRE_LEAD_TRADER=true`.
-5. **Kill switch script** — one-liner shell command that pauses the Railway service and
-   cancels all open positions. Worth writing in Phase 2 once a real Railway service exists.
+5. **Kill switch script — DONE.** `node kill-switch.js` cancels all open orders and
+   flattens positions on the configured symbol (or `--all-symbols` for everything).
+   Self-contained (no bot.js import). Use `--dry-run` to preview, `--cancel-only`
+   to leave positions intact. Wire to a Railway one-shot or PagerDuty webhook for
+   emergency response.
+6. **Forward-test verifier — DONE.** `node verify-forward-test.js --days 30`
+   compares the bot's logged daily decisions to what the strategy module would
+   have decided for the same days. Run daily during the 30-day paper test;
+   100% match before flipping `PAPER_TRADING=false`.
+7. **Symbol-precision rounding — DONE.** `bot.js::placeFuturesOrder` now calls
+   `/fapi/v1/exchangeInfo` and floors quantity to the symbol's step size. A
+   pre-flight check in paper mode also surfaces sub-`minQty` / sub-`minNotional`
+   issues before they bite at first real-money order.
 
 ## Verification commands
 
 ```bash
-# Onboarding still bootstraps a Binance-shaped .env
+# Onboarding bootstraps a Binance-shaped .env
 rm .env && node bot.js   # creates .env template, exits cleanly
 
 # Paper-mode end-to-end against live Binance Futures public API
@@ -72,8 +83,16 @@ node bot.js              # pulls klines, runs safety check, blocks/passes, write
 # Tax summary
 node bot.js --tax-summary
 
-# Backtest sanity (fast — 6 months at 4h)
-node backtest.js --symbol BTCUSDT --interval 4h --months 6
+# Backtest the chosen edge (the validated one)
+npm run backtest -- --strategy vwap-rsi-ema --symbol BTCUSDT --interval 1d --months 36 --oos-months 6
+
+# Forward-test verifier (run daily during the 30-day paper test)
+npm run verify -- --days 30
+
+# Kill switch (operations)
+npm run kill-switch -- --dry-run         # preview what would happen
+npm run kill-switch -- --cancel-only     # only cancel orders
+npm run kill-switch                      # cancel + flatten SYMBOL
 
 # Dashboard
 npm run dashboard        # http://localhost:3737
