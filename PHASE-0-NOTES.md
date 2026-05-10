@@ -129,6 +129,39 @@ once on your phone, save to home screen, never think about it again.
 Caveat: this exposes the dashboard publicly — `bot-state` branch contents
 are visible to anyone with the URL. Consider this carefully for live mode.
 
+## Telegram push notifier (optional)
+
+Add a phone push on every cron fire. Useful during the 30-day paper test —
+you'll know within seconds whether the bot ran, traded, or halted, instead
+of having to check the dashboard.
+
+### One-time setup (~3 minutes)
+
+1. On Telegram, talk to **@BotFather** → `/newbot` → choose a name + handle.
+   Save the token he gives you (looks like `123456:ABC-...`).
+2. Send your new bot any message (it must initiate the conversation), then
+   visit `https://api.telegram.org/bot<TOKEN>/getUpdates` in any browser.
+   Look for `"chat":{"id": <NUMBER>}` — that's your chat_id.
+3. Set in Railway env vars:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC-...
+   TELEGRAM_CHAT_ID=987654321
+   ```
+4. Next cron fire, your phone pings.
+
+### What you'll receive
+
+| Event | Message preview |
+|---|---|
+| Normal pass-through | `📋 PAPER · 2026-05-10 00:00Z` / `⏸ No trade — bias=neutral · Failed: …` |
+| Trade opened | `🔴 LIVE · 📈 LONG BTCUSDT @ $80622.80 · Size: $3333.33 (~A$4609)` |
+| Drawdown halt | `🔴 LIVE · 🚫 HALT — drawdown circuit tripped · 1-day P&L -3.4% breaches limit 3%` |
+| Order failed | `🔴 LIVE · ❌ Order failed — Quantity below minQty` |
+
+Off by default — silent no-op when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
+unset. Failure to deliver (token revoked, chat blocked, network) is logged as
+a warning but never blocks the bot.
+
 ## Verification commands
 
 ```bash

@@ -899,13 +899,15 @@ async function run() {
         `\nBot stopping. Set rules.risk_limits.halt_on_trip=false to disable, or wait for the window to clear.`,
       );
       const log = loadLog();
-      log.trades.push({
+      const haltEntry = {
         timestamp: new Date().toISOString(),
         symbol: CONFIG.symbol,
         haltedByDrawdownLimits: true,
         reasons,
-      });
+      };
+      log.trades.push(haltEntry);
       saveLog(log);
+      await notifyTelegram(haltEntry).catch(() => {});
       return;
     }
   }
@@ -1059,6 +1061,10 @@ async function run() {
     console.log(`  ⚠️  GitHub state push skipped: ${err.message}`),
   );
 
+  // Optional: Telegram push notification. Off by default; silent no-op when
+  // TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars not set.
+  await notifyTelegram(logEntry).catch(() => {});
+
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 
@@ -1114,6 +1120,80 @@ async function pushStateToGitHub(latestEntry) {
     }
   }
   console.log(`     ✅ ${ok}/${files.length} files synced`);
+}
+
+// ─── Telegram push notifier (optional, env-gated) ──────────────────────────
+//
+// Sends a one-line summary after each cron fire so you get pinged on your
+// phone instead of having to check the dashboard. Set TELEGRAM_BOT_TOKEN +
+// TELEGRAM_CHAT_ID in the bot's env (Railway) to enable. Off by default —
+// silent no-op when env vars not set.
+//
+// Setup:
+//   1. Talk to @BotFather on Telegram → /newbot → save the token
+//   2. Send your new bot any message, then visit:
+//      https://api.telegram.org/bot<TOKEN>/getUpdates
+//      → look for "chat":{"id": ...} — that's your chat_id
+//   3. Drop both into Railway env vars
+
+async function notifyTelegram(logEntry) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return; // not configured — silent no-op
+
+  const ts = new Date().toISOString().slice(0, 16).replace("T", " ") + "Z";
+  const mode = CONFIG.paperTrading
+    ? "📋 PAPER"
+    : CONFIG.binance.testnet
+      ? "🧪 TESTNET"
+      : "🔴 LIVE";
+
+  let body;
+  if (logEntry.haltedByDrawdownLimits) {
+    body = `🚫 *HALT* — drawdown circuit tripped\n${(logEntry.reasons || []).map((r) => `  • ${r}`).join("\n")}`;
+  } else if (!logEntry.allPass) {
+    const failed = (logEntry.conditions || [])
+      .filter((c) => !c.pass)
+      .map((c) => c.label)
+      .join("; ");
+    body =
+      `⏸ *No trade* — bias=${(logEntry.bias || "neutral")}\n` +
+      `Failed: ${failed.length > 140 ? failed.slice(0, 140) + "…" : failed}`;
+  } else if (logEntry.error) {
+    body = `❌ *Order failed* — ${(logEntry.error || "").slice(0, 200)}`;
+  } else if (logEntry.orderPlaced) {
+    const arrow = logEntry.bias === "short" ? "📉" : "📈";
+    body =
+      `${arrow} *${(logEntry.bias || "?").toUpperCase()}* ${logEntry.symbol} @ $${logEntry.price.toFixed(2)}\n` +
+      `Size: $${logEntry.tradeSize.toFixed(2)}` +
+      (logEntry.audRate ? ` (~A$${(logEntry.tradeSize * logEntry.audRate).toFixed(0)})` : "") +
+      `\nOrder: \`${logEntry.orderId || "—"}\``;
+  } else {
+    body = `✅ Ran — ${logEntry.symbol} @ $${logEntry.price?.toFixed(2) || "?"}`;
+  }
+
+  const text = `*${mode}* · \`${ts}\`\n${body}`;
+
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      console.log(`  ⚠️  Telegram notify failed: ${r.status} ${err.slice(0, 100)}`);
+    } else {
+      console.log(`  📨 Telegram notified`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  Telegram notify error: ${err.message}`);
+  }
 }
 
 async function pushOneFile(token, repo, branch, path, content) {
