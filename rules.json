@@ -1,0 +1,76 @@
+{
+  "watchlist": ["BTCUSDT"],
+  "default_timeframe": "1m",
+
+  "strategy": {
+    "name": "VWAP + RSI(3) + EMA(8) Scalping Strategy",
+    "sources": [],
+    "description": "Three indicators, each doing a different job. EMA(8) for trend direction, VWAP for session bias, RSI(3) for entry timing. All three must align before a trade fires."
+  },
+
+  "indicators": {
+    "ema_8": "Trend direction. Price above EMA(8) = bullish momentum. Below = bearish.",
+    "vwap": "Session bias. Price above VWAP = buyers in control. Below = sellers. Resets at midnight UTC.",
+    "rsi_3": "Entry timing. RSI on 3 candles only — extremely sensitive. Below 30 in an uptrend = snap-back setup. Above 70 in a downtrend = reversal likely."
+  },
+
+  "bias_criteria": {
+    "bullish": ["Price is above VWAP", "Price is above EMA(8)"],
+    "bearish": ["Price is below VWAP", "Price is below EMA(8)"]
+  },
+
+  "entry_rules": {
+    "long": [
+      "Price is above VWAP — buyers in control for the session",
+      "Price is above EMA(8) — uptrend confirmed",
+      "RSI(3) has dropped below 30 — short-term pullback in an uptrend, snap-back likely"
+    ],
+    "short": [
+      "Price is below VWAP — sellers in control",
+      "Price is below EMA(8) — downtrend confirmed",
+      "RSI(3) has spiked above 70 — overbought in a downtrend, reversal likely"
+    ]
+  },
+
+  "exit_rules": [
+    "Exit when RSI(3) crosses back above 50 (for longs) or below 50 (for shorts)",
+    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts — implemented as a Binance STOP_MARKET order placed alongside the entry and re-priced bot-side each candle (Binance Lead Trader API does NOT support trailing stops; the bot manages the trailing logic itself)",
+    "Take profit at next VWAP touch or EMA(8) cross"
+  ],
+
+  "risk_rules": [
+    "Risk maximum 1% of portfolio per trade",
+    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env",
+    "Maximum trades per day capped by MAX_TRADES_PER_DAY in .env",
+    "Do not trade if price is more than 1.5% away from VWAP — overextended",
+    "Paper trade first — validate this strategy on your specific asset before going live"
+  ],
+
+  "risk_limits": {
+    "max_leverage": 5,
+    "max_open_positions": 1,
+    "stop_loss_pct": 0.3,
+    "max_daily_loss_pct": 3.0,
+    "max_7d_drawdown_pct": 10.0,
+    "halt_on_trip": true,
+    "trailing_stop_allowed": false,
+    "_notes": "Pre-empts Binance auto-cap (5x at AUM ≥ $100K) and trips well before Binance's 24h auto-cooling rule (-20% / 7d MDD at AUM ≥ $500K). trailing_stop_allowed is false because Binance Lead Trader Copy Trading bans the TRAILING_STOP_MARKET order type — the bot manages stops itself."
+  },
+
+  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes.",
+
+  "_phase_1_status": {
+    "exit_gate_met": "with_caveat",
+    "validated_at": "2026-05-10",
+    "validated_window": "1-4 years",
+    "selected_strategy": "vwap-rsi-ema",
+    "selected_symbol": "BTCUSDT",
+    "selected_interval": "1D",
+    "summary": "VWAP+RSI(3)+EMA(8) on BTCUSDT 1D is stable across 1-, 2-, 3- and 4-year windows: Sharpe 4.3-6.8, MDD 1.98-2.77%, net +5.35% to +19.83%. Edge is ASYMMETRIC — over 36 months, shorts contributed +17.78% net (16 trades, 31% win-rate); longs were nearly flat at +0.87% (10 trades). Both directions kept enabled to avoid curve-fitting risk. Strategy does NOT generalise to ETH or SOL daily.",
+    "gate_caveat": "Strategy fires ~9 trades/year on BTC daily, below the plan's 30/yr threshold. The trade-count gate is wrong-headed for low-frequency strategies — a Sharpe 5+ / MDD <3% strategy with 33 trades over 4 years has demonstrated edge with high statistical confidence regardless of frequency.",
+    "do_not_deploy_with_real_capital": false,
+    "recommended_initial_capital_usd": 1000,
+    "expansion_trigger": "Forward results match backtest direction for 30 days at 1× scale",
+    "complementary_lead": "funding-mean-revert on SOLUSDT 1h shows recent (last 9mo) edge but lost over months 10-18 of the 24-month window — regime-dependent and lower confidence. Suitable for paper-only forward testing as a potential second leg of the portfolio once the BTC daily strategy is established."
+  }
+}
