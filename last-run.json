@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-05-10T11:32:54.867Z",
+  "symbol": "BTCUSDT",
+  "timeframe": "1D",
+  "portfolio": 1000,
+  "maxTradeUSD": 5000,
+  "maxTradesPerDay": 1,
+  "riskPerTradePct": 1,
+  "paperTrading": true,
+  "requireLeadTrader": false,
+  "testnet": true,
+  "last": {
+    "allPass": false,
+    "bias": "long",
+    "orderPlaced": false,
+    "orderId": null,
+    "haltedByDrawdownLimits": false
+  }
+}
