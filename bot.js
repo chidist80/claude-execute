@@ -301,9 +301,52 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules) {
   return { results, allPass, bias };
 }
 
+// ─── Trade Sizing ────────────────────────────────────────────────────────────
+//
+// Risk-based sizing: target a fixed % of portfolio at risk per trade, then
+// derive the position notional from the strategy's stop distance. This is the
+// standard sizing for systematic strategies and is what "risk maximum 1% of
+// portfolio per trade" in rules.json::risk_rules actually means.
+//
+//   risk_per_trade_usd = portfolio × risk_per_trade_pct
+//   position_usd       = risk_per_trade_usd / (stop_loss_pct / 100)
+//   tradeSize          = min(position_usd, portfolio × max_leverage, MAX_TRADE_SIZE_USD)
+//
+// The previous behaviour (`min(portfolio × 0.01, maxTradeSizeUSD)`) sized the
+// POSITION at 1% of portfolio, not the RISK at 1%. For a 0.3% stop that is
+// 333× under-sized and produced sub-tick quantities on majors like BTC.
+
+function computeTradeSize(rules) {
+  const stopPct = rules?.risk_limits?.stop_loss_pct ?? 0.3;
+  const riskPct = parseFloat(process.env.RISK_PER_TRADE_PCT || "1.0");
+  const maxLeverage = rules?.risk_limits?.max_leverage ?? 5;
+
+  const riskUSD = (CONFIG.portfolioValue * riskPct) / 100;
+  const positionByRisk = riskUSD / (stopPct / 100);
+  const positionByLeverage = CONFIG.portfolioValue * maxLeverage;
+  const tradeSize = Math.min(
+    positionByRisk,
+    positionByLeverage,
+    CONFIG.maxTradeSizeUSD,
+  );
+  return {
+    tradeSize,
+    riskUSD,
+    stopPct,
+    riskPct,
+    maxLeverage,
+    cappedBy:
+      tradeSize === positionByRisk
+        ? "risk"
+        : tradeSize === positionByLeverage
+          ? "leverage"
+          : "maxTradeSizeUSD",
+  };
+}
+
 // ─── Trade Limits ────────────────────────────────────────────────────────────
 
-function checkTradeLimits(log) {
+function checkTradeLimits(log, rules) {
   const todayCount = countTodaysTrades(log);
 
   console.log("\n── Trade Limits ─────────────────────────────────────────\n");
@@ -319,20 +362,9 @@ function checkTradeLimits(log) {
     `✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`,
   );
 
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.01,
-    CONFIG.maxTradeSizeUSD,
-  );
-
-  if (tradeSize > CONFIG.maxTradeSizeUSD) {
-    console.log(
-      `🚫 Trade size $${tradeSize.toFixed(2)} exceeds max $${CONFIG.maxTradeSizeUSD}`,
-    );
-    return false;
-  }
-
+  const sz = computeTradeSize(rules);
   console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} — within max $${CONFIG.maxTradeSizeUSD}`,
+    `✅ Trade size: $${sz.tradeSize.toFixed(2)} — risk $${sz.riskUSD.toFixed(2)} (${sz.riskPct}% of portfolio) at ${sz.stopPct}% stop, capped by ${sz.cappedBy}`,
   );
 
   return true;
@@ -829,7 +861,7 @@ async function run() {
   }
 
   const log = loadLog();
-  const withinLimits = checkTradeLimits(log);
+  const withinLimits = checkTradeLimits(log, rules);
   if (!withinLimits) {
     console.log("\nBot stopping — trade limits reached for today.");
     return;
@@ -869,10 +901,8 @@ async function run() {
 
   const { results, allPass, bias } = runSafetyCheck(price, ema8, vwap, rsi3, rules);
 
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.01,
-    CONFIG.maxTradeSizeUSD,
-  );
+  const sizingInfo = computeTradeSize(rules);
+  const tradeSize = sizingInfo.tradeSize;
 
   const audRate = await getUsdToAudRate();
 
@@ -888,6 +918,7 @@ async function run() {
     conditions: results,
     allPass,
     tradeSize,
+    sizing: sizingInfo,
     audRate,
     orderPlaced: false,
     orderId: null,
