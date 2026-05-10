@@ -301,9 +301,52 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules) {
   return { results, allPass, bias };
 }
 
+// ─── Trade Sizing ────────────────────────────────────────────────────────────
+//
+// Risk-based sizing: target a fixed % of portfolio at risk per trade, then
+// derive the position notional from the strategy's stop distance. This is the
+// standard sizing for systematic strategies and is what "risk maximum 1% of
+// portfolio per trade" in rules.json::risk_rules actually means.
+//
+//   risk_per_trade_usd = portfolio × risk_per_trade_pct
+//   position_usd       = risk_per_trade_usd / (stop_loss_pct / 100)
+//   tradeSize          = min(position_usd, portfolio × max_leverage, MAX_TRADE_SIZE_USD)
+//
+// The previous behaviour (`min(portfolio × 0.01, maxTradeSizeUSD)`) sized the
+// POSITION at 1% of portfolio, not the RISK at 1%. For a 0.3% stop that is
+// 333× under-sized and produced sub-tick quantities on majors like BTC.
+
+function computeTradeSize(rules) {
+  const stopPct = rules?.risk_limits?.stop_loss_pct ?? 0.3;
+  const riskPct = parseFloat(process.env.RISK_PER_TRADE_PCT || "1.0");
+  const maxLeverage = rules?.risk_limits?.max_leverage ?? 5;
+
+  const riskUSD = (CONFIG.portfolioValue * riskPct) / 100;
+  const positionByRisk = riskUSD / (stopPct / 100);
+  const positionByLeverage = CONFIG.portfolioValue * maxLeverage;
+  const tradeSize = Math.min(
+    positionByRisk,
+    positionByLeverage,
+    CONFIG.maxTradeSizeUSD,
+  );
+  return {
+    tradeSize,
+    riskUSD,
+    stopPct,
+    riskPct,
+    maxLeverage,
+    cappedBy:
+      tradeSize === positionByRisk
+        ? "risk"
+        : tradeSize === positionByLeverage
+          ? "leverage"
+          : "maxTradeSizeUSD",
+  };
+}
+
 // ─── Trade Limits ────────────────────────────────────────────────────────────
 
-function checkTradeLimits(log) {
+function checkTradeLimits(log, rules) {
   const todayCount = countTodaysTrades(log);
 
   console.log("\n── Trade Limits ─────────────────────────────────────────\n");
@@ -319,20 +362,9 @@ function checkTradeLimits(log) {
     `✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`,
   );
 
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.01,
-    CONFIG.maxTradeSizeUSD,
-  );
-
-  if (tradeSize > CONFIG.maxTradeSizeUSD) {
-    console.log(
-      `🚫 Trade size $${tradeSize.toFixed(2)} exceeds max $${CONFIG.maxTradeSizeUSD}`,
-    );
-    return false;
-  }
-
+  const sz = computeTradeSize(rules);
   console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} — within max $${CONFIG.maxTradeSizeUSD}`,
+    `✅ Trade size: $${sz.tradeSize.toFixed(2)} — risk $${sz.riskUSD.toFixed(2)} (${sz.riskPct}% of portfolio) at ${sz.stopPct}% stop, capped by ${sz.cappedBy}`,
   );
 
   return true;
@@ -543,12 +575,62 @@ async function getOpenPositions() {
 
 // ─── Binance Futures Order Placement (Gap 1) ──────────────────────────────
 
+// Cache exchangeInfo per symbol for the lifetime of the process. Public
+// endpoint, no auth, ~50ms. Filters change rarely (hours-to-days cadence) so
+// even a per-cron-invocation fetch is cheap; we cache to avoid the call when
+// placing multiple orders in one run.
+const _symbolFiltersCache = new Map();
+
+async function getSymbolFilters(symbol) {
+  if (_symbolFiltersCache.has(symbol)) return _symbolFiltersCache.get(symbol);
+  const url = `${CONFIG.binance.fapiBase}/fapi/v1/exchangeInfo`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`exchangeInfo HTTP ${res.status}`);
+  const data = await res.json();
+  const sym = data.symbols.find((s) => s.symbol === symbol);
+  if (!sym) throw new Error(`Symbol ${symbol} not in exchangeInfo`);
+  const lotSize = sym.filters.find((f) => f.filterType === "LOT_SIZE");
+  const minNotional = sym.filters.find((f) => f.filterType === "MIN_NOTIONAL");
+  const filters = {
+    stepSize: parseFloat(lotSize.stepSize),
+    minQty: parseFloat(lotSize.minQty),
+    maxQty: parseFloat(lotSize.maxQty),
+    minNotional: parseFloat(minNotional?.notional || "0"),
+    quantityPrecision: sym.quantityPrecision,
+    pricePrecision: sym.pricePrecision,
+  };
+  _symbolFiltersCache.set(symbol, filters);
+  return filters;
+}
+
+// Floor `qty` to the nearest multiple of `stepSize`, preserving exactly the
+// number of decimals dictated by the step (so the wire format matches Binance's
+// expectations: e.g. step 0.001 → "0.037", step 1 → "19").
+function roundToStep(qty, stepSize) {
+  const decimals = stepSize >= 1 ? 0 : Math.max(0, -Math.floor(Math.log10(stepSize)));
+  const rounded = Math.floor(qty / stepSize) * stepSize;
+  return rounded.toFixed(decimals);
+}
+
 async function placeFuturesOrder(symbol, side, sizeUSD, price) {
   // side: "BUY" (open long, or close short) | "SELL" (open short, or close long)
-  // Quantity is in base asset. Round to a sensible precision; per-symbol tickSize/stepSize
-  // is enforced by Binance — we use 3 decimals as a safe default for BTCUSDT/ETHUSDT.
-  // Production-grade rounding requires /fapi/v1/exchangeInfo lookup; that's a Phase 1 deliverable.
-  const quantity = (sizeUSD / price).toFixed(3);
+  const filters = await getSymbolFilters(symbol);
+  const rawQty = sizeUSD / price;
+  const quantity = roundToStep(rawQty, filters.stepSize);
+  const qtyNum = parseFloat(quantity);
+  if (qtyNum < filters.minQty) {
+    throw new Error(
+      `Computed quantity ${quantity} ${symbol} (from $${sizeUSD.toFixed(2)} / $${price.toFixed(2)}) ` +
+        `is below minQty ${filters.minQty}. Increase PORTFOLIO_VALUE_USD, RISK_PER_TRADE_PCT, ` +
+        `or MAX_TRADE_SIZE_USD — or pick a smaller-priced symbol.`,
+    );
+  }
+  const notional = qtyNum * price;
+  if (notional < filters.minNotional) {
+    throw new Error(
+      `Computed notional $${notional.toFixed(2)} is below ${symbol} minNotional $${filters.minNotional}.`,
+    );
+  }
 
   await throttleOrderSlot();
 
@@ -817,19 +899,21 @@ async function run() {
         `\nBot stopping. Set rules.risk_limits.halt_on_trip=false to disable, or wait for the window to clear.`,
       );
       const log = loadLog();
-      log.trades.push({
+      const haltEntry = {
         timestamp: new Date().toISOString(),
         symbol: CONFIG.symbol,
         haltedByDrawdownLimits: true,
         reasons,
-      });
+      };
+      log.trades.push(haltEntry);
       saveLog(log);
+      await notifyTelegram(haltEntry).catch(() => {});
       return;
     }
   }
 
   const log = loadLog();
-  const withinLimits = checkTradeLimits(log);
+  const withinLimits = checkTradeLimits(log, rules);
   if (!withinLimits) {
     console.log("\nBot stopping — trade limits reached for today.");
     return;
@@ -869,10 +953,35 @@ async function run() {
 
   const { results, allPass, bias } = runSafetyCheck(price, ema8, vwap, rsi3, rules);
 
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.01,
-    CONFIG.maxTradeSizeUSD,
-  );
+  const sizingInfo = computeTradeSize(rules);
+  const tradeSize = sizingInfo.tradeSize;
+
+  // Precision pre-flight: catch sub-minimum quantities BEFORE going live.
+  // Runs in paper mode too so the 30-day forward test surfaces config issues
+  // before they bite at first real-money order.
+  let precisionWarning = null;
+  try {
+    const filters = await getSymbolFilters(CONFIG.symbol);
+    const rawQty = tradeSize / price;
+    const rounded = parseFloat(roundToStep(rawQty, filters.stepSize));
+    if (rounded < filters.minQty) {
+      precisionWarning =
+        `Quantity ${rounded} ${CONFIG.symbol} is below minQty ${filters.minQty}. ` +
+        `Increase PORTFOLIO_VALUE_USD or RISK_PER_TRADE_PCT, or pick a smaller-priced symbol.`;
+    } else if (rounded * price < filters.minNotional) {
+      precisionWarning =
+        `Notional $${(rounded * price).toFixed(2)} is below ${CONFIG.symbol} minNotional $${filters.minNotional}.`;
+    } else {
+      console.log(
+        `  ✅ Quantity check: ${rounded} ${CONFIG.symbol} (step ${filters.stepSize}, minQty ${filters.minQty})`,
+      );
+    }
+    if (precisionWarning) {
+      console.log(`  ⚠️  PRECISION: ${precisionWarning}`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  exchangeInfo lookup failed: ${err.message}`);
+  }
 
   const audRate = await getUsdToAudRate();
 
@@ -888,6 +997,8 @@ async function run() {
     conditions: results,
     allPass,
     tradeSize,
+    sizing: sizingInfo,
+    precisionWarning,
     audRate,
     orderPlaced: false,
     orderId: null,
@@ -943,7 +1054,184 @@ async function run() {
 
   writeTradeCsv(logEntry, audRate);
 
+  // Optional: push state to a GitHub branch so a hosted dashboard can read it
+  // from anywhere. Off by default — set GITHUB_STATE_TOKEN + GITHUB_STATE_REPO
+  // in the bot's .env (Railway env) to enable.
+  await pushStateToGitHub(logEntry).catch((err) =>
+    console.log(`  ⚠️  GitHub state push skipped: ${err.message}`),
+  );
+
+  // Optional: Telegram push notification. Off by default; silent no-op when
+  // TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars not set.
+  await notifyTelegram(logEntry).catch(() => {});
+
   console.log("═══════════════════════════════════════════════════════════\n");
+}
+
+// ─── GitHub state push (optional, env-gated) ────────────────────────────────
+//
+// Mirrors local state files to a branch in a GitHub repo on every cron fire so
+// a hosted dashboard (or just GitHub web view) can see what the bot is doing
+// without exposing the bot's HTTP service. Branch must exist first — see
+// PHASE-0-NOTES.md "Hosted dashboard setup" for the one-time bootstrap.
+
+async function pushStateToGitHub(latestEntry) {
+  const token = process.env.GITHUB_STATE_TOKEN;
+  const repo = process.env.GITHUB_STATE_REPO; // e.g. "chidist80/claude-execute"
+  if (!token || !repo) return; // not configured — silent no-op
+  const branch = process.env.GITHUB_STATE_BRANCH || "bot-state";
+
+  const lastRun = {
+    timestamp: new Date().toISOString(),
+    symbol: CONFIG.symbol,
+    timeframe: CONFIG.timeframe,
+    portfolio: CONFIG.portfolioValue,
+    maxTradeUSD: CONFIG.maxTradeSizeUSD,
+    maxTradesPerDay: CONFIG.maxTradesPerDay,
+    riskPerTradePct: parseFloat(process.env.RISK_PER_TRADE_PCT || "1.0"),
+    paperTrading: CONFIG.paperTrading,
+    requireLeadTrader: process.env.BINANCE_REQUIRE_LEAD_TRADER === "true",
+    testnet: CONFIG.binance.testnet,
+    last: latestEntry
+      ? {
+          allPass: !!latestEntry.allPass,
+          bias: latestEntry.bias || null,
+          orderPlaced: !!latestEntry.orderPlaced,
+          orderId: latestEntry.orderId || null,
+          haltedByDrawdownLimits: !!latestEntry.haltedByDrawdownLimits,
+        }
+      : null,
+  };
+
+  const files = [["last-run.json", JSON.stringify(lastRun, null, 2)]];
+  if (existsSync(LOG_FILE)) files.push([LOG_FILE, readFileSync(LOG_FILE, "utf8")]);
+  if (existsSync(EQUITY_FILE)) files.push([EQUITY_FILE, readFileSync(EQUITY_FILE, "utf8")]);
+  if (existsSync(CSV_FILE)) files.push([CSV_FILE, readFileSync(CSV_FILE, "utf8")]);
+  if (existsSync("rules.json")) files.push(["rules.json", readFileSync("rules.json", "utf8")]);
+
+  console.log(`\n  🔄 Pushing ${files.length} state files to ${repo}@${branch}...`);
+  let ok = 0;
+  for (const [path, content] of files) {
+    try {
+      await pushOneFile(token, repo, branch, path, content);
+      ok++;
+    } catch (err) {
+      console.log(`     ❌ ${path}: ${err.message.slice(0, 100)}`);
+    }
+  }
+  console.log(`     ✅ ${ok}/${files.length} files synced`);
+}
+
+// ─── Telegram push notifier (optional, env-gated) ──────────────────────────
+//
+// Sends a one-line summary after each cron fire so you get pinged on your
+// phone instead of having to check the dashboard. Set TELEGRAM_BOT_TOKEN +
+// TELEGRAM_CHAT_ID in the bot's env (Railway) to enable. Off by default —
+// silent no-op when env vars not set.
+//
+// Setup:
+//   1. Talk to @BotFather on Telegram → /newbot → save the token
+//   2. Send your new bot any message, then visit:
+//      https://api.telegram.org/bot<TOKEN>/getUpdates
+//      → look for "chat":{"id": ...} — that's your chat_id
+//   3. Drop both into Railway env vars
+
+async function notifyTelegram(logEntry) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return; // not configured — silent no-op
+
+  const ts = new Date().toISOString().slice(0, 16).replace("T", " ") + "Z";
+  const mode = CONFIG.paperTrading
+    ? "📋 PAPER"
+    : CONFIG.binance.testnet
+      ? "🧪 TESTNET"
+      : "🔴 LIVE";
+
+  let body;
+  if (logEntry.haltedByDrawdownLimits) {
+    body = `🚫 *HALT* — drawdown circuit tripped\n${(logEntry.reasons || []).map((r) => `  • ${r}`).join("\n")}`;
+  } else if (!logEntry.allPass) {
+    const failed = (logEntry.conditions || [])
+      .filter((c) => !c.pass)
+      .map((c) => c.label)
+      .join("; ");
+    body =
+      `⏸ *No trade* — bias=${(logEntry.bias || "neutral")}\n` +
+      `Failed: ${failed.length > 140 ? failed.slice(0, 140) + "…" : failed}`;
+  } else if (logEntry.error) {
+    body = `❌ *Order failed* — ${(logEntry.error || "").slice(0, 200)}`;
+  } else if (logEntry.orderPlaced) {
+    const arrow = logEntry.bias === "short" ? "📉" : "📈";
+    body =
+      `${arrow} *${(logEntry.bias || "?").toUpperCase()}* ${logEntry.symbol} @ $${logEntry.price.toFixed(2)}\n` +
+      `Size: $${logEntry.tradeSize.toFixed(2)}` +
+      (logEntry.audRate ? ` (~A$${(logEntry.tradeSize * logEntry.audRate).toFixed(0)})` : "") +
+      `\nOrder: \`${logEntry.orderId || "—"}\``;
+  } else {
+    body = `✅ Ran — ${logEntry.symbol} @ $${logEntry.price?.toFixed(2) || "?"}`;
+  }
+
+  const text = `*${mode}* · \`${ts}\`\n${body}`;
+
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      console.log(`  ⚠️  Telegram notify failed: ${r.status} ${err.slice(0, 100)}`);
+    } else {
+      console.log(`  📨 Telegram notified`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  Telegram notify error: ${err.message}`);
+  }
+}
+
+async function pushOneFile(token, repo, branch, path, content) {
+  const apiBase = `https://api.github.com/repos/${repo}/contents/${path}`;
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+
+  // Look up current SHA so we can update rather than fail-on-exists.
+  let sha = null;
+  const head = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, {
+    headers,
+  });
+  if (head.ok) {
+    const data = await head.json();
+    sha = data.sha;
+  } else if (head.status !== 404) {
+    throw new Error(`GET ${head.status}`);
+  }
+
+  const body = {
+    message: `bot: ${path} @ ${new Date().toISOString().slice(0, 19)}Z`,
+    content: Buffer.from(content, "utf8").toString("base64"),
+    branch,
+  };
+  if (sha) body.sha = sha;
+
+  const put = await fetch(apiBase, {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!put.ok) {
+    const text = await put.text();
+    throw new Error(`PUT ${put.status}: ${text.slice(0, 150)}`);
+  }
 }
 
 if (process.argv.includes("--tax-summary")) {

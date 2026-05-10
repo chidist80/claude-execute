@@ -88,3 +88,93 @@ export function smaSeries(closes, period) {
   }
   return out;
 }
+
+// Average True Range. Wilder's smoothing.
+export function atrSeries(candles, period = 14) {
+  const out = new Array(candles.length).fill(null);
+  if (candles.length < period + 1) return out;
+  const trs = new Array(candles.length).fill(null);
+  for (let i = 1; i < candles.length; i++) {
+    const tr = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close),
+    );
+    trs[i] = tr;
+  }
+  let atr = trs.slice(1, period + 1).reduce((a, b) => a + b, 0) / period;
+  out[period] = atr;
+  for (let i = period + 1; i < candles.length; i++) {
+    atr = (atr * (period - 1) + trs[i]) / period;
+    out[i] = atr;
+  }
+  return out;
+}
+
+// N-period return (close[i] / close[i-N] - 1). Returns 0 if not enough data.
+export function returnSeries(closes, period) {
+  const out = new Array(closes.length).fill(null);
+  for (let i = period; i < closes.length; i++) {
+    if (closes[i - period] > 0) {
+      out[i] = closes[i] / closes[i - period] - 1;
+    }
+  }
+  return out;
+}
+
+// Rolling z-score: (value - rolling_mean) / rolling_std over `window` previous samples.
+// Walk-forward safe: at index i, uses samples [i-window+1 ... i].
+export function zScoreSeries(values, window) {
+  const out = new Array(values.length).fill(null);
+  if (window < 2 || values.length < window) return out;
+  for (let i = window - 1; i < values.length; i++) {
+    let sum = 0,
+      n = 0;
+    for (let j = i - window + 1; j <= i; j++) {
+      if (values[j] != null) {
+        sum += values[j];
+        n++;
+      }
+    }
+    if (n < 2) continue;
+    const mean = sum / n;
+    let sq = 0;
+    for (let j = i - window + 1; j <= i; j++) {
+      if (values[j] != null) sq += (values[j] - mean) ** 2;
+    }
+    const std = Math.sqrt(sq / (n - 1));
+    if (std > 1e-12 && values[i] != null) out[i] = (values[i] - mean) / std;
+  }
+  return out;
+}
+
+// Realised vol over `window` candles, as σ of log returns. Annualized factor optional.
+export function realizedVolSeries(closes, window, annualizeFactor = 1) {
+  const out = new Array(closes.length).fill(null);
+  if (closes.length < window + 1) return out;
+  const logRets = new Array(closes.length).fill(null);
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i - 1] > 0 && closes[i] > 0) {
+      logRets[i] = Math.log(closes[i] / closes[i - 1]);
+    }
+  }
+  for (let i = window; i < closes.length; i++) {
+    let sum = 0,
+      n = 0;
+    for (let j = i - window + 1; j <= i; j++) {
+      if (logRets[j] != null) {
+        sum += logRets[j];
+        n++;
+      }
+    }
+    if (n < 2) continue;
+    const mean = sum / n;
+    let sq = 0;
+    for (let j = i - window + 1; j <= i; j++) {
+      if (logRets[j] != null) sq += (logRets[j] - mean) ** 2;
+    }
+    const std = Math.sqrt(sq / (n - 1));
+    out[i] = std * Math.sqrt(annualizeFactor);
+  }
+  return out;
+}

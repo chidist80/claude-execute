@@ -1,7 +1,9 @@
 .env
+.DS_Store
 *.log
 safety-check-log.json
 equity-history.json
+last-run.json
 backtest-*.csv
 phase-1-comparison.json
 phase-1-compare-output.txt

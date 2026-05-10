@@ -34,6 +34,9 @@ function parseArgs() {
     outDir: ".",
     compare: false,
     quiet: false,
+    // Walk-forward / OOS: reserve the last `oosMonths` for out-of-sample evaluation.
+    // Strategy is *not* re-fit on OOS data; this is purely a leakage check.
+    oosMonths: 0,
   };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
@@ -47,6 +50,7 @@ function parseArgs() {
     else if (a === "--start") (args.start = v), i++;
     else if (a === "--end") (args.end = v), i++;
     else if (a === "--out") (args.outDir = v), i++;
+    else if (a === "--oos-months") (args.oosMonths = parseInt(v, 10)), i++;
     else if (a === "--compare") args.compare = true;
     else if (a === "--quiet") args.quiet = true;
   }
@@ -210,6 +214,10 @@ async function runSingle(opts) {
   const startMs = opts.start
     ? new Date(opts.start).getTime()
     : endMs - opts.months * 30 * 24 * 60 * 60 * 1000;
+  const oosCutoffMs =
+    opts.oosMonths > 0
+      ? endMs - opts.oosMonths * 30 * 24 * 60 * 60 * 1000
+      : null;
 
   if (!opts.quiet) {
     console.log("═══════════════════════════════════════════════════════════");
@@ -219,6 +227,11 @@ async function runSingle(opts) {
     console.log(
       `  Range      : ${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}`,
     );
+    if (oosCutoffMs) {
+      console.log(
+        `  OOS cutoff : ${new Date(oosCutoffMs).toISOString()}  (last ${opts.oosMonths}mo)`,
+      );
+    }
     console.log(`  Per-side fee: ${(opts.fee * 100).toFixed(3)}%`);
     console.log("═══════════════════════════════════════════════════════════");
   }
@@ -244,6 +257,21 @@ async function runSingle(opts) {
   const stressTrades = strat.runBacktest({ candles, aux, rules, fee: opts.fee * 2 });
   const stress = summarize(stressTrades, opts.fee * 2);
 
+  // OOS split — re-summarize trades that fall in the OOS window only
+  let oosStats = null;
+  if (oosCutoffMs) {
+    const oosTrades = trades.filter(
+      (t) => new Date(t.entryTime).getTime() >= oosCutoffMs,
+    );
+    const isTrades = trades.filter(
+      (t) => new Date(t.entryTime).getTime() < oosCutoffMs,
+    );
+    oosStats = {
+      in_sample: summarize(isTrades, opts.fee),
+      out_of_sample: summarize(oosTrades, opts.fee),
+    };
+  }
+
   if (!opts.quiet) {
     console.log("\n── Summary ──────────────────────────────────────────────\n");
     console.log(`  Trades              : ${stats.trades}`);
@@ -255,6 +283,14 @@ async function runSingle(opts) {
     console.log(`  Fee drag            : ${stats.fee_drag_pct.toFixed(3)}%`);
     console.log(`  Trades / year       : ${stats.trades_per_year.toFixed(1)}`);
     console.log(`\n  Stress: at 2× fee  : net ${stress.net_return_pct.toFixed(2)}%, win-rate ${(stress.win_rate * 100).toFixed(2)}%`);
+
+    if (oosStats) {
+      console.log("\n── In-sample / Out-of-sample ───────────────────────────");
+      const fmt = (s) =>
+        `n=${s.trades.toString().padStart(3)}  net ${s.net_return_pct.toFixed(2).padStart(7)}%  Sharpe ${s.sharpe.toFixed(2).padStart(5)}  MDD ${s.mdd_pct.toFixed(2).padStart(5)}%`;
+      console.log(`  In-sample   : ${fmt(oosStats.in_sample)}`);
+      console.log(`  Out-of-sample: ${fmt(oosStats.out_of_sample)}`);
+    }
 
     const stem = `backtest-${opts.strategy}-${opts.symbol}-${opts.interval}-${new Date(startMs).toISOString().slice(0, 10)}`;
     const csvPath = `${opts.outDir.replace(/\/$/, "")}/${stem}.csv`;
@@ -278,30 +314,43 @@ async function runSingle(opts) {
     console.log("\n═══════════════════════════════════════════════════════════\n");
   }
 
-  return { stats, stress, trades };
+  return { stats, stress, oosStats, trades };
 }
 
 // ─── Compare matrix ────────────────────────────────────────────────────────
 
 const COMPARE_MATRIX = [
   // [strategyId, symbol, interval]
+  // -- Phase 1 baselines (kept for regression) --
   ["vwap-rsi-ema", "BTCUSDT", "4h"],
   ["vwap-rsi-ema", "ETHUSDT", "4h"],
   ["vwap-rsi-ema", "SOLUSDT", "4h"],
-  ["vwap-rsi-ema", "BTCUSDT", "1h"],
-  ["vwap-rsi-ema", "ETHUSDT", "1h"],
-  ["vwap-rsi-ema", "SOLUSDT", "1h"],
 
   ["funding-mean-revert", "BTCUSDT", "1h"],
   ["funding-mean-revert", "ETHUSDT", "1h"],
   ["funding-mean-revert", "SOLUSDT", "1h"],
 
-  ["taker-flow-momentum", "BTCUSDT", "4h"],
-  ["taker-flow-momentum", "ETHUSDT", "4h"],
-  ["taker-flow-momentum", "SOLUSDT", "4h"],
   ["taker-flow-momentum", "BTCUSDT", "1h"],
   ["taker-flow-momentum", "ETHUSDT", "1h"],
   ["taker-flow-momentum", "SOLUSDT", "1h"],
+
+  // -- Phase 1.5 deep edge hunt --
+  ["tsmom", "BTCUSDT", "1d"],
+  ["tsmom", "ETHUSDT", "1d"],
+  ["tsmom", "SOLUSDT", "1d"],
+
+  ["funding-adaptive", "BTCUSDT", "1h"],
+  ["funding-adaptive", "ETHUSDT", "1h"],
+  ["funding-adaptive", "SOLUSDT", "1h"],
+
+  ["donchian-vol", "BTCUSDT", "4h"],
+  ["donchian-vol", "ETHUSDT", "4h"],
+  ["donchian-vol", "SOLUSDT", "4h"],
+
+  // oi-momentum lives in strategies/ but is excluded from the 12-month matrix:
+  // /futures/data/openInterestHist hard-caps at 30 days of history, so it
+  // cannot be evaluated on a comparable timeframe. Run manually with --months 1
+  // for a recency check.
 ];
 
 function passesGate(stats, stress) {
@@ -316,14 +365,15 @@ function passesGate(stats, stress) {
 async function runCompare(opts) {
   const results = [];
   console.log("═══════════════════════════════════════════════════════════");
-  console.log(`  Phase 1 strategy comparison`);
-  console.log(`  Months back : ${opts.months}`);
-  console.log(`  Per-side fee: ${(opts.fee * 100).toFixed(3)}%`);
-  console.log(`  Matrix size : ${COMPARE_MATRIX.length} runs`);
+  console.log(`  Strategy comparison`);
+  console.log(`  Months back  : ${opts.months}`);
+  console.log(`  OOS reserved : ${opts.oosMonths || 0}mo`);
+  console.log(`  Per-side fee : ${(opts.fee * 100).toFixed(3)}%`);
+  console.log(`  Matrix size  : ${COMPARE_MATRIX.length} runs`);
   console.log("═══════════════════════════════════════════════════════════\n");
 
   for (const [strategy, symbol, interval] of COMPARE_MATRIX) {
-    process.stdout.write(`  ${strategy.padEnd(22)} ${symbol.padEnd(8)} ${interval.padEnd(4)} ... `);
+    process.stdout.write(`  ${strategy.padEnd(22)} ${symbol.padEnd(10)} ${interval.padEnd(4)} ... `);
     const t0 = Date.now();
     try {
       const r = await runSingle({ ...opts, strategy, symbol, interval, quiet: true });
@@ -333,8 +383,13 @@ async function runCompare(opts) {
       }
       const ms = Date.now() - t0;
       const gate = passesGate(r.stats, r.stress);
+      let oosLabel = "";
+      if (r.oosStats) {
+        const oos = r.oosStats.out_of_sample;
+        oosLabel = ` | OOS n=${oos.trades.toString().padStart(3)} net ${oos.net_return_pct.toFixed(2).padStart(7)}% Sharpe ${oos.sharpe.toFixed(2).padStart(5)}`;
+      }
       console.log(
-        `${r.stats.trades.toString().padStart(4)} trades | net ${r.stats.net_return_pct.toFixed(2).padStart(7)}% | Sharpe ${r.stats.sharpe.toFixed(2).padStart(5)} | MDD ${r.stats.mdd_pct.toFixed(2).padStart(5)}% | t/yr ${r.stats.trades_per_year.toFixed(0).padStart(3)} | 2×fee ${r.stress.net_return_pct.toFixed(2).padStart(7)}% | ${gate ? "✅ GATE" : "❌"} (${ms}ms)`,
+        `${r.stats.trades.toString().padStart(4)} trades | net ${r.stats.net_return_pct.toFixed(2).padStart(7)}% | Sharpe ${r.stats.sharpe.toFixed(2).padStart(5)} | MDD ${r.stats.mdd_pct.toFixed(2).padStart(5)}% | t/yr ${r.stats.trades_per_year.toFixed(0).padStart(3)} | 2×fee ${r.stress.net_return_pct.toFixed(2).padStart(7)}% | ${gate ? "✅ GATE" : "❌    "}${oosLabel} (${ms}ms)`,
       );
       results.push({
         strategy,
@@ -342,6 +397,7 @@ async function runCompare(opts) {
         interval,
         stats: r.stats,
         stress: r.stress,
+        oosStats: r.oosStats,
         gate,
       });
     } catch (err) {
@@ -349,22 +405,29 @@ async function runCompare(opts) {
     }
   }
 
-  // Group by strategy and emit a markdown comparison report
   console.log("\n── Leaderboard (passes gate first, then by Sharpe) ─────\n");
   const sorted = results.slice().sort((a, b) => {
     if (a.gate !== b.gate) return a.gate ? -1 : 1;
     return b.stats.sharpe - a.stats.sharpe;
   });
-  for (const r of sorted.slice(0, 10)) {
+  for (const r of sorted.slice(0, 12)) {
+    let oosTag = "";
+    if (r.oosStats) {
+      const o = r.oosStats.out_of_sample;
+      oosTag = ` | OOS Sharpe ${o.sharpe.toFixed(2).padStart(5)}, net ${o.net_return_pct.toFixed(2).padStart(7)}%`;
+    }
     console.log(
-      `  ${r.gate ? "✅" : "  "} ${r.strategy.padEnd(22)} ${r.symbol.padEnd(8)} ${r.interval.padEnd(4)}  Sharpe ${r.stats.sharpe.toFixed(2).padStart(5)} | net ${r.stats.net_return_pct.toFixed(2).padStart(7)}% | MDD ${r.stats.mdd_pct.toFixed(2).padStart(5)}%`,
+      `  ${r.gate ? "✅" : "  "} ${r.strategy.padEnd(22)} ${r.symbol.padEnd(10)} ${r.interval.padEnd(4)}  Sharpe ${r.stats.sharpe.toFixed(2).padStart(5)} | net ${r.stats.net_return_pct.toFixed(2).padStart(7)}% | MDD ${r.stats.mdd_pct.toFixed(2).padStart(5)}%${oosTag}`,
     );
   }
 
-  // Write a JSON dump for machine consumption + a markdown report
   writeFileSync(
     "phase-1-comparison.json",
-    JSON.stringify({ generatedAt: new Date().toISOString(), opts: { months: opts.months, fee: opts.fee }, results }, null, 2),
+    JSON.stringify(
+      { generatedAt: new Date().toISOString(), opts: { months: opts.months, oosMonths: opts.oosMonths, fee: opts.fee }, results },
+      null,
+      2,
+    ),
   );
   console.log("\n  Full results → phase-1-comparison.json");
 

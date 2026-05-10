@@ -121,7 +121,24 @@ header {
   margin-right: 6px;
 }
 .dot.amber { background: var(--amber); box-shadow: 0 0 8px rgba(255,183,0,0.6); }
+.dot.red { background: var(--red); box-shadow: 0 0 8px rgba(255,51,85,0.6); }
 @keyframes blink { 50% { opacity: 0.25; } }
+
+/* ─── Health pill (last-run staleness) ─── */
+.pill-health {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  border: 1px solid var(--green-faint);
+  border-radius: 2px;
+  margin: 0 8px;
+}
+.pill-health.fresh   { color: var(--green); border-color: var(--green-dim); }
+.pill-health.stale   { color: var(--amber); border-color: var(--amber); }
+.pill-health.alarm   { color: var(--red);   border-color: var(--red); animation: blink 0.9s steps(2,end) infinite; }
+.pill-health.no-data { color: var(--grey);  border-color: var(--grey); }
 
 /* ─── Stats strip ─── */
 .stats {
@@ -356,6 +373,7 @@ footer {
     </div>
     <div class="status">
       <span><span class="dot" id="mode-dot"></span><span id="mode-text">PAPER</span></span>
+      <span class="pill-health no-data" id="health-pill">◌ NO DATA</span>
       <span id="utc-clock" class="dim">--:--:-- UTC</span>
     </div>
   </header>
@@ -365,15 +383,15 @@ footer {
     <div class="stat"><div class="label">Total Decisions</div><div class="val tabular" id="s-total">0</div><div class="sub">all-time</div></div>
     <div class="stat"><div class="label">Trades Taken</div><div class="val tabular" id="s-taken">0</div><div class="sub">orders placed</div></div>
     <div class="stat"><div class="label">Blocked</div><div class="val red tabular" id="s-blocked">0</div><div class="sub">safety check failed</div></div>
-    <div class="stat"><div class="label">Today</div><div class="val amber tabular" id="s-today">0 / 0</div><div class="sub">used / cap</div></div>
-    <div class="stat"><div class="label">Total Volume</div><div class="val tabular" id="s-volume">$0</div><div class="sub">USD executed</div></div>
-    <div class="stat"><div class="label">Est. Fees</div><div class="val tabular" id="s-fees">$0</div><div class="sub">cumulative</div></div>
+    <div class="stat"><div class="label">Halted</div><div class="val amber tabular" id="s-today">0</div><div class="sub">drawdown trips</div></div>
+    <div class="stat"><div class="label">Total Volume</div><div class="val tabular" id="s-volume">$0</div><div class="sub">USD / AUD</div></div>
+    <div class="stat"><div class="label">Est. Fees</div><div class="val tabular" id="s-fees">$0</div><div class="sub">0.05%/side cumulative</div></div>
   </div>
 
   <!-- MAIN GRID -->
   <main>
-    <!-- EXECUTED -->
-    <section class="panel" style="grid-column: 1; grid-row: 1 / span 2;">
+    <!-- EXECUTED (top-left) -->
+    <section class="panel" style="grid-column: 1; grid-row: 1;">
       <div class="panel-head">
         <span><span class="h">▸ EXECUTED TRADES</span></span>
         <span class="pill" id="exec-count">0 records</span>
@@ -389,7 +407,18 @@ footer {
       </div>
     </section>
 
-    <!-- DECISION FEED -->
+    <!-- EQUITY & DRAWDOWN (bottom-left) — risk-floor live status -->
+    <section class="panel" style="grid-column: 1; grid-row: 2;">
+      <div class="panel-head">
+        <span><span class="h">▸ EQUITY &amp; DRAWDOWN</span></span>
+        <span class="pill" id="equity-tag">risk floor</span>
+      </div>
+      <div class="panel-body" id="equity-body">
+        <div class="empty">LOADING…</div>
+      </div>
+    </section>
+
+    <!-- DECISION FEED (top-right) -->
     <section class="panel" style="grid-column: 2; grid-row: 1;">
       <div class="panel-head">
         <span><span class="h">▸ DECISION FEED</span></span>
@@ -404,7 +433,7 @@ footer {
       </div>
     </section>
 
-    <!-- DETAIL -->
+    <!-- DETAIL (bottom-right) -->
     <section class="panel" style="grid-column: 2; grid-row: 2;">
       <div class="panel-head">
         <span><span class="h">▸ DECISION DETAIL</span></span>
@@ -468,6 +497,8 @@ const state = {
   env: {},
   rules: {},
   csv: '',
+  equity: { samples: [] },
+  health: null,
   filter: 'all',
   selectedIdx: null,
 };
@@ -480,20 +511,84 @@ const fmtTime = (iso) => {
   return d.toISOString().slice(0, 19).replace('T', ' ');
 };
 
+// Source switching: by default read from local /api endpoints (npm run dashboard).
+// Pass ?source=https://raw.githubusercontent.com/<owner>/<repo>/bot-state to read
+// state files pushed there by the live bot. See README "Hosted dashboard" section.
+const REMOTE_SOURCE = (() => {
+  const u = new URL(window.location.href);
+  const s = u.searchParams.get('source');
+  if (!s) return null;
+  return s.replace(/\/$/, '');
+})();
+
+const SOURCES = REMOTE_SOURCE
+  ? {
+      log:    `${REMOTE_SOURCE}/safety-check-log.json`,
+      env:    `${REMOTE_SOURCE}/last-run.json`,        // bot writes a sanitised env summary here
+      csv:    `${REMOTE_SOURCE}/trades.csv`,
+      rules:  `${REMOTE_SOURCE}/rules.json`,
+      equity: `${REMOTE_SOURCE}/equity-history.json`,
+      health: null, // computed client-side when remote
+    }
+  : {
+      log:    '/api/log',
+      env:    '/api/env',
+      csv:    '/api/csv',
+      rules:  '/api/rules',
+      equity: '/api/equity',
+      health: '/api/health',
+    };
+
+async function fetchOrEmpty(url, fallback) {
+  if (!url) return fallback;
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return fallback;
+    return url.endsWith('.csv') ? await r.text() : await r.json();
+  } catch {
+    return fallback;
+  }
+}
+
+function deriveHealthFromLog(log, expectedHours = 24) {
+  const trades = (log?.trades || []).filter(t => t.timestamp);
+  if (trades.length === 0) return { status: 'no-data', lastTs: null, ageMs: null };
+  const lastEntry = trades[trades.length - 1];
+  const ageMs = Date.now() - new Date(lastEntry.timestamp).getTime();
+  const expected = expectedHours * 60 * 60 * 1000;
+  const status = ageMs < expected * 1.1 ? 'fresh' : ageMs < expected * 2 ? 'stale' : 'alarm';
+  return {
+    status, lastTs: lastEntry.timestamp, ageMs, expectedIntervalMs: expected,
+    last: {
+      symbol: lastEntry.symbol, bias: lastEntry.bias || null,
+      allPass: !!lastEntry.allPass, orderPlaced: !!lastEntry.orderPlaced,
+      orderId: lastEntry.orderId || null,
+      haltedByDrawdownLimits: !!lastEntry.haltedByDrawdownLimits,
+      precisionWarning: lastEntry.precisionWarning || null,
+    }
+  };
+}
+
 async function fetchAll() {
   try {
-    const [logRes, envRes, csvRes, rulesRes] = await Promise.all([
-      fetch('/api/log').then(r => r.json()),
-      fetch('/api/env').then(r => r.json()),
-      fetch('/api/csv').then(r => r.text()),
-      fetch('/api/rules').then(r => r.json()),
+    const [logRes, envRes, csvRes, rulesRes, equityRes, healthRes] = await Promise.all([
+      fetchOrEmpty(SOURCES.log, { trades: [] }),
+      fetchOrEmpty(SOURCES.env, {}),
+      fetchOrEmpty(SOURCES.csv, ''),
+      fetchOrEmpty(SOURCES.rules, {}),
+      fetchOrEmpty(SOURCES.equity, { samples: [] }),
+      SOURCES.health ? fetchOrEmpty(SOURCES.health, null) : null,
     ]);
     state.log = logRes && logRes.trades ? logRes : { trades: [] };
     state.env = envRes;
     state.csv = csvRes;
     state.rules = rulesRes;
+    state.equity = equityRes && equityRes.samples ? equityRes : { samples: [] };
+    state.health = healthRes || deriveHealthFromLog(state.log);
     render();
-    document.getElementById('status-line').textContent = '▸ CONNECTED — ' + state.log.trades.length + ' decisions on file';
+    const sourceTag = REMOTE_SOURCE ? ' (remote)' : '';
+    document.getElementById('status-line').textContent =
+      '▸ CONNECTED' + sourceTag + ' — ' + state.log.trades.length + ' decisions on file';
     document.getElementById('last-refresh').textContent = 'last sync: ' + new Date().toISOString().slice(11, 19) + 'Z';
   } catch (e) {
     document.getElementById('status-line').textContent = '▸ DISCONNECTED — ' + e.message;
@@ -510,33 +605,112 @@ function render() {
   document.getElementById('last-ema').textContent = last && last.indicators ? fmtUSD(last.indicators.ema8) : '—';
   document.getElementById('last-vwap').textContent = last && last.indicators ? fmtUSD(last.indicators.vwap) : '—';
 
-  // Mode pill
+  // Mode pill — paper / live + testnet flag + lead-trader strict
   const isPaper = state.env.paperTrading !== false;
-  const modeText = isPaper ? 'PAPER MODE' : 'LIVE MODE';
+  let modeText = isPaper ? 'PAPER MODE' : 'LIVE MODE';
+  if (state.env.testnet) modeText += ' (testnet)';
+  if (state.env.requireLeadTrader && !isPaper) modeText += ' (LEAD)';
   document.getElementById('mode-text').textContent = modeText;
   const dot = document.getElementById('mode-dot');
   dot.classList.toggle('amber', isPaper);
+  dot.classList.toggle('red', !isPaper && !state.env.testnet);
 
-  // Stats
+  // Health pill — fresh/stale/alarm based on time since last bot fire
+  const healthEl = document.getElementById('health-pill');
+  if (healthEl) {
+    const h = state.health;
+    if (!h || h.status === 'no-data') {
+      healthEl.textContent = '◌ NO DATA';
+      healthEl.className = 'pill-health no-data';
+    } else {
+      const age = h.ageMs;
+      const ageStr = age < 60_000 ? '<1m'
+        : age < 3_600_000 ? Math.round(age / 60_000) + 'm'
+        : age < 86_400_000 ? Math.round(age / 3_600_000) + 'h'
+        : Math.round(age / 86_400_000) + 'd';
+      const icon = h.status === 'fresh' ? '●' : h.status === 'stale' ? '◐' : '⚠';
+      healthEl.textContent = `${icon} ${h.status.toUpperCase()} · ${ageStr} ago`;
+      healthEl.className = 'pill-health ' + h.status;
+    }
+  }
+
+  // Stats — for daily strategy, "Trades Today" is binary; show lifetime + side breakdown instead
   const trades = state.log.trades;
-  const taken = trades.filter(t => t.orderPlaced).length;
-  const blocked = trades.filter(t => !t.allPass).length;
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const today = trades.filter(t => (t.timestamp || '').startsWith(todayKey) && t.orderPlaced).length;
-  const cap = state.env.maxTradesPerDay || 0;
-  const volume = trades.filter(t => t.orderPlaced).reduce((s, t) => s + (t.tradeSize || 0), 0);
-  const fees = volume * 0.001;
+  const executed = trades.filter(t => t.orderPlaced);
+  const longTrades = executed.filter(t => (t.bias || '') === 'long' || (t.bias || '') === 'BULLISH').length;
+  const shortTrades = executed.filter(t => (t.bias || '') === 'short' || (t.bias || '') === 'BEARISH').length;
+  const blocked = trades.filter(t => !t.allPass && !t.haltedByDrawdownLimits).length;
+  const halted = trades.filter(t => t.haltedByDrawdownLimits).length;
+  const volume = executed.reduce((s, t) => s + (t.tradeSize || 0), 0);
+  // Binance USD-M Futures: 0.04% maker / 0.05% taker. We use MARKET orders → 0.05% per side.
+  const fees = volume * 0.0005;
+  const audVolume = executed.reduce((s, t) => s + (t.tradeSize || 0) * (t.audRate || 0), 0);
 
   document.getElementById('s-total').textContent = trades.length;
-  document.getElementById('s-taken').textContent = taken;
+  document.getElementById('s-taken').textContent = `${executed.length} (${longTrades}L/${shortTrades}S)`;
   document.getElementById('s-blocked').textContent = blocked;
-  document.getElementById('s-today').textContent = today + ' / ' + cap;
-  document.getElementById('s-volume').textContent = fmtUSD(volume);
+  // "Today" → "Halted" — far more useful for a daily strategy with drawdown circuit-breaker
+  const haltCard = document.getElementById('s-today');
+  if (haltCard) haltCard.textContent = halted ? `${halted}` : '0';
+  document.getElementById('s-volume').textContent = fmtUSD(volume) + (audVolume > 0 ? ` / A$${audVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '');
   document.getElementById('s-fees').textContent = fmtUSD(fees);
 
+  renderEquity();
   renderExecuted();
   renderFeed();
   renderDetail();
+}
+
+function renderEquity() {
+  const el = document.getElementById('equity-body');
+  if (!el) return;
+  const samples = state.equity?.samples || [];
+  if (samples.length < 2) {
+    el.innerHTML = `<div class="empty">
+      <div>${state.env.paperTrading !== false ? 'PAPER MODE — equity samples only collected in live mode' : 'NO EQUITY SAMPLES YET'}</div>
+      <div class="dim" style="margin-top:8px;font-size:11px">Risk floor: max daily loss ${state.rules?.risk_limits?.max_daily_loss_pct || '—'}%, 7-day MDD ${state.rules?.risk_limits?.max_7d_drawdown_pct || '—'}%, halt-on-trip ${state.rules?.risk_limits?.halt_on_trip ? 'ENABLED' : 'disabled'}</div>
+    </div>`;
+    return;
+  }
+  // Stats: current, peak (trailing 7d), 1d Δ, 7d MDD
+  const now = Date.now();
+  const recent = samples.filter(s => now - new Date(s.ts).getTime() < 7 * 86400_000);
+  const cur = recent[recent.length - 1].equity;
+  const peak = Math.max(...recent.map(s => s.equity));
+  const trough = Math.min(...recent.map(s => s.equity));
+  const mdd = peak > 0 ? ((peak - trough) / peak) * 100 : 0;
+  const oneDay = recent.filter(s => now - new Date(s.ts).getTime() < 86400_000);
+  const dayDelta = oneDay.length >= 2 ? ((oneDay[oneDay.length - 1].equity - oneDay[0].equity) / oneDay[0].equity) * 100 : 0;
+
+  // SVG sparkline of recent equity
+  const w = 320, h = 60, pad = 4;
+  const xs = recent.map((_, i) => pad + (i * (w - 2 * pad)) / (recent.length - 1));
+  const minE = Math.min(...recent.map(s => s.equity));
+  const maxE = Math.max(...recent.map(s => s.equity));
+  const range = maxE - minE || 1;
+  const ys = recent.map(s => h - pad - ((s.equity - minE) / range) * (h - 2 * pad));
+  const pathD = recent.map((_, i) => (i === 0 ? 'M' : 'L') + xs[i].toFixed(1) + ' ' + ys[i].toFixed(1)).join(' ');
+
+  const dayClass = dayDelta >= 0 ? '' : 'red';
+  const limits = state.rules?.risk_limits || {};
+  const dailyLimit = limits.max_daily_loss_pct || 3;
+  const mddLimit = limits.max_7d_drawdown_pct || 10;
+  const dayDanger = Math.abs(dayDelta) > dailyLimit * 0.7 && dayDelta < 0;
+  const mddDanger = mdd > mddLimit * 0.7;
+
+  el.innerHTML = `
+    <div style="padding:12px 14px">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:12px">
+        <div><div class="label" style="font-size:10px;letter-spacing:0.18em;color:var(--green-dim)">EQUITY</div><div class="val tabular" style="font-size:18px;color:var(--green);margin-top:2px">${fmtUSD(cur)}</div></div>
+        <div><div class="label" style="font-size:10px;letter-spacing:0.18em;color:var(--green-dim)">1-DAY Δ</div><div class="val tabular ${dayClass} ${dayDanger ? 'amber' : ''}" style="font-size:18px;margin-top:2px">${(dayDelta >= 0 ? '+' : '') + dayDelta.toFixed(2)}%</div><div class="dim" style="font-size:10px">limit ${dailyLimit}%</div></div>
+        <div><div class="label" style="font-size:10px;letter-spacing:0.18em;color:var(--green-dim)">7-DAY MDD</div><div class="val tabular ${mddDanger ? 'amber' : ''}" style="font-size:18px;margin-top:2px">${mdd.toFixed(2)}%</div><div class="dim" style="font-size:10px">limit ${mddLimit}%</div></div>
+      </div>
+      <svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <path d="${pathD}" fill="none" stroke="var(--green)" stroke-width="1.5" filter="drop-shadow(0 0 4px var(--green-glow))" />
+      </svg>
+      <div class="dim" style="font-size:10px;margin-top:6px">${recent.length} samples · last ${recent[recent.length - 1].ts.slice(11, 19)}Z</div>
+    </div>
+  `;
 }
 
 function renderExecuted() {
@@ -560,10 +734,14 @@ function renderExecuted() {
   const rows = executed.map(({ t, idx }) => {
     const ts = fmtTime(t.timestamp);
     const mode = t.paperTrading ? '<span class="tag-paper">PAPER</span>' : '<span class="tag-live">LIVE</span>';
+    // Side from the strategy bias, not hardcoded BUY. Lower-case "long"/"short" written by bot.js.
+    const biasUpper = (t.bias || '').toUpperCase();
+    const sideLabel = biasUpper === 'SHORT' ? 'SHORT' : biasUpper === 'LONG' ? 'LONG' : '—';
+    const sideClass = biasUpper === 'SHORT' ? 'side-sell' : biasUpper === 'LONG' ? 'side-buy' : 'dim';
     return `<tr data-idx="${idx}">
       <td class="dim tabular">${ts}</td>
       <td>${t.symbol || '—'}</td>
-      <td class="side-buy">BUY</td>
+      <td class="${sideClass}">${sideLabel}</td>
       <td class="tabular">${fmtUSD(t.price)}</td>
       <td class="tabular">${fmtUSD(t.tradeSize)}</td>
       <td>${mode}</td>

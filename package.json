@@ -8,6 +8,8 @@
     "start": "node bot.js",
     "dev": "node bot.js",
     "backtest": "node backtest.js",
+    "verify": "node verify-forward-test.js",
+    "kill-switch": "node kill-switch.js",
     "dashboard": "node dashboard/server.cjs"
   },
   "dependencies": {
