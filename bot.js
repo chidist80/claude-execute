@@ -1052,7 +1052,106 @@ async function run() {
 
   writeTradeCsv(logEntry, audRate);
 
+  // Optional: push state to a GitHub branch so a hosted dashboard can read it
+  // from anywhere. Off by default — set GITHUB_STATE_TOKEN + GITHUB_STATE_REPO
+  // in the bot's .env (Railway env) to enable.
+  await pushStateToGitHub(logEntry).catch((err) =>
+    console.log(`  ⚠️  GitHub state push skipped: ${err.message}`),
+  );
+
   console.log("═══════════════════════════════════════════════════════════\n");
+}
+
+// ─── GitHub state push (optional, env-gated) ────────────────────────────────
+//
+// Mirrors local state files to a branch in a GitHub repo on every cron fire so
+// a hosted dashboard (or just GitHub web view) can see what the bot is doing
+// without exposing the bot's HTTP service. Branch must exist first — see
+// PHASE-0-NOTES.md "Hosted dashboard setup" for the one-time bootstrap.
+
+async function pushStateToGitHub(latestEntry) {
+  const token = process.env.GITHUB_STATE_TOKEN;
+  const repo = process.env.GITHUB_STATE_REPO; // e.g. "chidist80/claude-execute"
+  if (!token || !repo) return; // not configured — silent no-op
+  const branch = process.env.GITHUB_STATE_BRANCH || "bot-state";
+
+  const lastRun = {
+    timestamp: new Date().toISOString(),
+    symbol: CONFIG.symbol,
+    timeframe: CONFIG.timeframe,
+    portfolio: CONFIG.portfolioValue,
+    maxTradeUSD: CONFIG.maxTradeSizeUSD,
+    maxTradesPerDay: CONFIG.maxTradesPerDay,
+    riskPerTradePct: parseFloat(process.env.RISK_PER_TRADE_PCT || "1.0"),
+    paperTrading: CONFIG.paperTrading,
+    requireLeadTrader: process.env.BINANCE_REQUIRE_LEAD_TRADER === "true",
+    testnet: CONFIG.binance.testnet,
+    last: latestEntry
+      ? {
+          allPass: !!latestEntry.allPass,
+          bias: latestEntry.bias || null,
+          orderPlaced: !!latestEntry.orderPlaced,
+          orderId: latestEntry.orderId || null,
+          haltedByDrawdownLimits: !!latestEntry.haltedByDrawdownLimits,
+        }
+      : null,
+  };
+
+  const files = [["last-run.json", JSON.stringify(lastRun, null, 2)]];
+  if (existsSync(LOG_FILE)) files.push([LOG_FILE, readFileSync(LOG_FILE, "utf8")]);
+  if (existsSync(EQUITY_FILE)) files.push([EQUITY_FILE, readFileSync(EQUITY_FILE, "utf8")]);
+  if (existsSync(CSV_FILE)) files.push([CSV_FILE, readFileSync(CSV_FILE, "utf8")]);
+  if (existsSync("rules.json")) files.push(["rules.json", readFileSync("rules.json", "utf8")]);
+
+  console.log(`\n  🔄 Pushing ${files.length} state files to ${repo}@${branch}...`);
+  let ok = 0;
+  for (const [path, content] of files) {
+    try {
+      await pushOneFile(token, repo, branch, path, content);
+      ok++;
+    } catch (err) {
+      console.log(`     ❌ ${path}: ${err.message.slice(0, 100)}`);
+    }
+  }
+  console.log(`     ✅ ${ok}/${files.length} files synced`);
+}
+
+async function pushOneFile(token, repo, branch, path, content) {
+  const apiBase = `https://api.github.com/repos/${repo}/contents/${path}`;
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+
+  // Look up current SHA so we can update rather than fail-on-exists.
+  let sha = null;
+  const head = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, {
+    headers,
+  });
+  if (head.ok) {
+    const data = await head.json();
+    sha = data.sha;
+  } else if (head.status !== 404) {
+    throw new Error(`GET ${head.status}`);
+  }
+
+  const body = {
+    message: `bot: ${path} @ ${new Date().toISOString().slice(0, 19)}Z`,
+    content: Buffer.from(content, "utf8").toString("base64"),
+    branch,
+  };
+  if (sha) body.sha = sha;
+
+  const put = await fetch(apiBase, {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!put.ok) {
+    const text = await put.text();
+    throw new Error(`PUT ${put.status}: ${text.slice(0, 150)}`);
+  }
 }
 
 if (process.argv.includes("--tax-summary")) {

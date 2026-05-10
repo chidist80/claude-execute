@@ -71,6 +71,64 @@ that is unsafe to automate.
    pre-flight check in paper mode also surfaces sub-`minQty` / sub-`minNotional`
    issues before they bite at first real-money order.
 
+## Hosted dashboard setup (optional)
+
+The local dashboard (`npm run dashboard` → http://localhost:3737) reads bot state
+straight off disk. To check on a Railway-deployed bot from your phone, the bot
+needs to mirror state somewhere reachable. The simplest route is a private
+GitHub branch + a `?source=…` query on the dashboard.
+
+### One-time bootstrap
+
+1. **Create an orphan branch in your fork** to hold bot state:
+   ```bash
+   git checkout --orphan bot-state
+   git rm -rf .
+   echo "# Bot state — auto-updated by Railway bot. Do not edit by hand." > README.md
+   git add README.md && git commit -m "init bot-state"
+   git push origin bot-state
+   git checkout main   # or your working branch
+   ```
+2. **Generate a fine-grained PAT** at <https://github.com/settings/personal-access-tokens/new>:
+   - Resource owner: your account
+   - Repository access: select only your fork (e.g. `chidist80/claude-execute`)
+   - Permissions: **Contents: Read and write** (only)
+   - Expiry: 90 days (rotate before that — Phase 3 task)
+3. **Add to Railway env vars** (Service → Variables):
+   ```
+   GITHUB_STATE_TOKEN=ghp_xxx
+   GITHUB_STATE_REPO=chidist80/claude-execute
+   GITHUB_STATE_BRANCH=bot-state
+   ```
+4. The bot will mirror state files on the next cron fire. View raw files at
+   `https://raw.githubusercontent.com/<owner>/<repo>/bot-state/last-run.json`
+   (and the same path for `safety-check-log.json`, `equity-history.json`,
+   `trades.csv`, `rules.json`).
+
+### Three ways to view from outside your laptop
+
+**(a) GitHub web UI — zero setup.** Navigate to your fork → switch to
+`bot-state` branch. Every file rendered, full revision history per cron fire.
+Mobile-friendly. Best for daily eyeball checks.
+
+**(b) Local dashboard pointed at remote — best UI.**
+```bash
+# Run the dashboard locally
+npm run dashboard
+# Open http://localhost:3737/?source=https://raw.githubusercontent.com/chidist80/claude-execute/bot-state
+```
+The dashboard's `?source=` query switches the data fetches from `/api/*` to
+the given URL prefix. Cache-busted (5-min CDN cache, 5-second poll). Works
+from anywhere on your laptop's local network.
+
+**(c) GitHub Pages — bookmark from phone.** Inside `bot-state` branch, copy
+`dashboard/index.html` to the branch root, then enable GitHub Pages on the
+branch. The dashboard will be served at
+`https://<username>.github.io/<repo>/?source=.` (relative to itself). Visit
+once on your phone, save to home screen, never think about it again.
+Caveat: this exposes the dashboard publicly — `bot-state` branch contents
+are visible to anyone with the URL. Consider this carefully for live mode.
+
 ## Verification commands
 
 ```bash

@@ -80,15 +80,77 @@ const server = http.createServer((req, res) => {
     return serveFile(res, p, "application/json");
   }
 
+  if (url === "/api/equity") {
+    const p = path.join(ROOT, "equity-history.json");
+    if (!fs.existsSync(p)) {
+      return send(res, 200, '{"samples":[]}', { "Content-Type": "application/json" });
+    }
+    return serveFile(res, p, "application/json");
+  }
+
+  if (url === "/api/health") {
+    // Composite health snapshot: timeliness + last-decision summary.
+    const logPath = path.join(ROOT, "safety-check-log.json");
+    let lastTs = null;
+    let lastEntry = null;
+    if (fs.existsSync(logPath)) {
+      try {
+        const log = JSON.parse(fs.readFileSync(logPath, "utf8"));
+        const trades = (log.trades || []).filter((t) => t.timestamp);
+        if (trades.length > 0) {
+          lastEntry = trades[trades.length - 1];
+          lastTs = lastEntry.timestamp;
+        }
+      } catch {}
+    }
+    const ageMs = lastTs ? Date.now() - new Date(lastTs).getTime() : null;
+    // Cron expectation: configurable. Default to 24h (daily strategy).
+    const expectedIntervalMs =
+      Number(process.env.EXPECTED_INTERVAL_HOURS || 24) * 60 * 60 * 1000;
+    const status =
+      ageMs == null
+        ? "no-data"
+        : ageMs < expectedIntervalMs * 1.1
+          ? "fresh"
+          : ageMs < expectedIntervalMs * 2
+            ? "stale"
+            : "alarm";
+    return send(
+      res,
+      200,
+      JSON.stringify({
+        status,
+        lastTs,
+        ageMs,
+        expectedIntervalMs,
+        last: lastEntry
+          ? {
+              symbol: lastEntry.symbol,
+              bias: lastEntry.bias || null,
+              allPass: !!lastEntry.allPass,
+              orderPlaced: !!lastEntry.orderPlaced,
+              orderId: lastEntry.orderId || null,
+              haltedByDrawdownLimits: !!lastEntry.haltedByDrawdownLimits,
+              precisionWarning: lastEntry.precisionWarning || null,
+            }
+          : null,
+      }),
+      { "Content-Type": "application/json" },
+    );
+  }
+
   if (url === "/api/env") {
     // Surface only safe-to-display config (no secrets)
     const env = {
       symbol: process.env.SYMBOL || "BTCUSDT",
-      timeframe: process.env.TIMEFRAME || "4H",
+      timeframe: process.env.TIMEFRAME || "1D",
       portfolio: Number(process.env.PORTFOLIO_VALUE_USD) || null,
       maxTradeUSD: Number(process.env.MAX_TRADE_SIZE_USD) || null,
       maxTradesPerDay: Number(process.env.MAX_TRADES_PER_DAY) || null,
+      riskPerTradePct: Number(process.env.RISK_PER_TRADE_PCT) || 1.0,
       paperTrading: (process.env.PAPER_TRADING || "true") === "true",
+      requireLeadTrader: (process.env.BINANCE_REQUIRE_LEAD_TRADER || "false") === "true",
+      testnet: /testnet/i.test(process.env.BINANCE_FAPI_BASE_URL || ""),
     };
     return send(res, 200, JSON.stringify(env), { "Content-Type": "application/json" });
   }
