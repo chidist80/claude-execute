@@ -247,6 +247,79 @@ in live mode** unless one of the following is done:
 sizing bug doesn't bite paper). Before flipping to live, land the risk-based
 sizing change. That's tracked as a Phase 2 prerequisite in `PHASE-0-NOTES.md`.
 
+## Path C — long-only spot investigation (AU retail constraint)
+
+**Question asked (2026-05-10):** the AUS regulatory situation forbids retail futures access. Can we find any executable long-only spot edge instead?
+
+**Answer:** No — not in this 10-strategy × symbol matrix at 36-month windows with 6-month out-of-sample held back. Several strategies look impressive in-sample, then **lose 30–73% out-of-sample**. The most recent 6 months are precisely the regime we'd deploy into, and that regime is killing every long-only edge we tested.
+
+### How it was tested
+
+Added `--long-only` and `--spot` flags to `backtest.js`. `--long-only` filters bidirectional strategy trades to long-side only (mimics spot execution where shorts aren't possible). `--spot` additionally bumps fees to 0.10%/side (Binance.com.au taker, 2× the futures rate).
+
+Added a new strategy: `strategies/xs-momentum.js` — cross-sectional momentum on a top-5 USDT basket (BTC, ETH, SOL, BNB, XRP), weekly rebalance, hold top-K by 30-day return, optional absolute-floor filter to sit in cash when no symbol qualifies.
+
+Compare matrix: `node backtest.js --compare --compare-mode spot-long-only --months 36 --oos-months 6`
+
+### Results (36mo IS + 6mo OOS, fee 0.10%/side)
+
+| Strategy | Symbol | n | IS net | IS Sharpe | IS MDD | OOS net | Pass gate? |
+|---|---|---|---|---|---|---|---|
+| tsmom | ETHUSDT 1d | 20 | **+73.99%** | 4.24 | 34.15% | **-11.30%** | ❌ OOS reversal, MDD too high |
+| tsmom | BTCUSDT 1d | 29 | **+64.08%** | 3.14 | 35.85% | **-5.39%** | ❌ OOS reversal, MDD too high |
+| donchian-vol | BTCUSDT 1d | 4 | +95.94% | (n/a) | 6.98% | 0.00% | ❌ only 1.3 trades/yr — sample too small |
+| donchian-vol | ETHUSDT 1d | 6 | +29.90% | (n/a) | 17.51% | -13.82% | ❌ sample too small |
+| vwap-rsi-ema | ETHUSDT 1d | 14 | +6.25% | 3.23 | 3.45% | -1.99% | ❌ trades/yr 5 |
+| vwap-rsi-ema | BTCUSDT 1d (long-only) | 10 | -2.98% | -13.12 | 3.73% | +0.27% | ❌ confirms: removing the short side kills the BTC daily edge — 90% of profit was on shorts |
+| xs-momentum | TOP-5 1d (no abs filter) | 149 | -94.14% | 0.16 | 98.18% | -72.95% | ❌ catastrophic — buys least-bad in bear markets |
+| xs-momentum | TOP-5 1d (abs floor 0%) | 86 | **+283.92%** | 2.77 | 79.31% | **-52.40%** | ❌ extreme OOS reversal + 79% MDD |
+| xs-momentum | TOP-5 1d (abs floor +5%) | 68 | **+222.70%** | 2.79 | 78.91% | **-38.94%** | ❌ same pattern |
+| xs-momentum | TOP-5 1d (top K=1, abs 0%) | 57 | **+574.47%** | 3.24 | 62.01% | **-30.70%** | ❌ same pattern |
+| tsmom | SOLUSDT 1d | 64 | -87.93% | -0.09 | 95.97% | -2.29% | ❌ caught full SOL bear cycle |
+| donchian-vol | SOLUSDT 1d | 5 | -38.21% | (n/a) | 38.21% | 0.00% | ❌ |
+| vwap-rsi-ema | SOLUSDT 1d (long-only) | 3 | -1.49% | (n/a) | 1.49% | 0.00% | ❌ trades/yr 1 |
+
+**Zero of 10 cells pass the Phase 1 exit gate (Sharpe ≥ 1.0, MDD ≤ 25%, ≥ 30 trades/yr, net positive at 2× fee).**
+
+### What the data is telling us
+
+1. **The original short-side edge does not survive removal of shorts.** VWAP-RSI BTC daily long-only loses 3% over 36mo at spot fees. The 95% of that strategy's profit that came from shorts is non-substitutable on Binance.com.au.
+
+2. **Long-only momentum strategies caught the 2022–2024 alt rally and stopped working.** XS-momentum's 200-575% in-sample returns are concentrated in the alt-season melt-up. The last 6 months (post-rally) show 30-52% losses. The strategy's edge is specifically "alt-season trend-following" which is a regime that's currently absent.
+
+3. **Drawdowns kill long-only crypto.** Even net-positive long-only strategies show 35–98% MDDs because there's no short side to hedge bear cycles. A Lead Trader product wouldn't survive a 35% drawdown — followers would dump after the first 10%.
+
+4. **Donchian breakout shows the most stable per-trade economics** (96% IS, 7% MDD on BTC) but only 4 trades in 36 months. Sample size too small to validate, gate fails on trade count, and OOS contributes 0 trades to evaluate.
+
+### Implications
+
+For an AU retail spot bot **with the goal of being a Lead Trader**: the data doesn't support it. Edge isn't reliably present.
+
+For an AU retail spot bot **just for personal capital growth**: passive strategies are likely to outperform any directional strategy we've tested — DCA, buy-and-hold BTC with periodic rebalance into stables, or yield strategies (staking, AMM LP) on a separate venue. None of those need a custom bot — they need an exchange's recurring buy feature.
+
+### Reproduction commands
+
+```bash
+# Full path-C compare matrix
+node backtest.js --compare --compare-mode spot-long-only --months 36 --oos-months 6
+
+# Single strategy long-only at spot fee
+node backtest.js --strategy vwap-rsi-ema --symbol ETHUSDT --interval 1d --months 36 --oos-months 6 --long-only --fee 0.001
+
+# XS-momentum parameter sweep
+XSMOM_TOP_K=1 node backtest.js --strategy xs-momentum --symbol TOP-5 --interval 1d --months 36 --oos-months 6 --fee 0.001
+XSMOM_ABS_FLOOR=0.05 node backtest.js --strategy xs-momentum --symbol TOP-5 --interval 1d --months 36 --oos-months 6 --fee 0.001
+```
+
+### Recommendation
+
+The honest call: **path C does not justify deploying capital**. The validated futures edge from Phase 1.5 (VWAP-RSI BTC daily, Sharpe 6.8 over 4yr) does not have a long-only-spot equivalent in our test space.
+
+Two ways forward, both valid:
+
+- **Pivot to Path A (Hyperliquid)** — accept DeFi-perp regulatory ambiguity in exchange for the validated futures edge. The asymmetric short-side BTC daily VWAP-RSI strategy ports cleanly. Smart-contract risk is real and acknowledged.
+- **Step back from active trading** — passive strategies (DCA, hold BTC + rebalance into stables on extreme valuation, AMM/staking yields) are likely to outperform anything we'd build for AU spot retail in the current regime. None need this bot.
+
 ## Backtest harness limitations (still worth knowing)
 
 These don't invalidate the BTC-daily finding, but they cap how literally to take the
