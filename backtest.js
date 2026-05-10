@@ -34,9 +34,15 @@ function parseArgs() {
     outDir: ".",
     compare: false,
     quiet: false,
-    // Walk-forward / OOS: reserve the last `oosMonths` for out-of-sample evaluation.
-    // Strategy is *not* re-fit on OOS data; this is purely a leakage check.
     oosMonths: 0,
+    // Path-C exploration: simulate AU spot execution (no shorts possible) by
+    // dropping any short-side trades the strategy generates, and bumping fees
+    // to the Binance.com.au spot taker rate (~0.1%). Use --spot for both.
+    longOnly: false,
+    spot: false,
+    // --compare-mode: "futures" (default — original 18-cell matrix) or
+    // "spot-long-only" (Path C investigation matrix)
+    compareMode: "futures",
   };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
@@ -52,7 +58,14 @@ function parseArgs() {
     else if (a === "--out") (args.outDir = v), i++;
     else if (a === "--oos-months") (args.oosMonths = parseInt(v, 10)), i++;
     else if (a === "--compare") args.compare = true;
-    else if (a === "--quiet") args.quiet = true;
+    else if (a === "--compare-mode") (args.compareMode = v), i++;
+    else if (a === "--long-only") args.longOnly = true;
+    else if (a === "--spot") {
+      args.spot = true;
+      args.longOnly = true;
+      // Override fee unless user already set --fee explicitly
+      if (args.fee === 0.0005) args.fee = 0.001;
+    } else if (a === "--quiet") args.quiet = true;
   }
   return args;
 }
@@ -236,25 +249,46 @@ async function runSingle(opts) {
     console.log("═══════════════════════════════════════════════════════════");
   }
 
-  const candles = await fetchKlinesRange(opts.symbol, opts.interval, startMs, endMs);
-  if (!opts.quiet) console.log(`  ${candles.length} candles fetched`);
+  // Multi-symbol strategies (e.g. cross-sectional momentum) own their own
+  // kline fetching via loadAuxData. The harness skips its single-symbol fetch
+  // and just passes empty candles — strategy reads everything from aux.
+  let candles = [];
+  if (!strat.meta?.multiSymbol) {
+    candles = await fetchKlinesRange(opts.symbol, opts.interval, startMs, endMs);
+    if (!opts.quiet) console.log(`  ${candles.length} candles fetched`);
 
-  if (candles.length < 50) {
-    if (!opts.quiet) console.log("\n⚠️  Not enough candles to backtest.");
-    return null;
+    if (candles.length < 50) {
+      if (!opts.quiet) console.log("\n⚠️  Not enough candles to backtest.");
+      return null;
+    }
+  } else if (!opts.quiet) {
+    console.log(`  (multi-symbol strategy — fetching universe via loadAuxData)`);
   }
 
   const aux = strat.loadAuxData
-    ? await strat.loadAuxData({ symbol: opts.symbol, startMs, endMs })
+    ? await strat.loadAuxData({ symbol: opts.symbol, startMs, endMs, interval: opts.interval })
     : {};
 
-  const trades = strat.runBacktest({ candles, aux, rules, fee: opts.fee });
+  let trades = strat.runBacktest({ candles, aux, rules, fee: opts.fee });
+
+  // Long-only filter: AU retail spot has no short-selling, so drop any short
+  // entries the strategy emits. Equivalent to "trade only the long signals,
+  // stay flat otherwise" — what a spot-only deployment would actually do.
+  if (opts.longOnly) {
+    const before = trades.length;
+    trades = trades.filter((t) => t.side === "long");
+    if (!opts.quiet) {
+      console.log(`  Long-only filter: ${before} → ${trades.length} trades (dropped ${before - trades.length} short)`);
+    }
+  }
+
   if (!opts.quiet) console.log(`  ${trades.length} trades simulated`);
 
   const stats = summarize(trades, opts.fee);
 
   // 2x-fee stress
-  const stressTrades = strat.runBacktest({ candles, aux, rules, fee: opts.fee * 2 });
+  let stressTrades = strat.runBacktest({ candles, aux, rules, fee: opts.fee * 2 });
+  if (opts.longOnly) stressTrades = stressTrades.filter((t) => t.side === "long");
   const stress = summarize(stressTrades, opts.fee * 2);
 
   // OOS split — re-summarize trades that fall in the OOS window only
@@ -353,6 +387,27 @@ const COMPARE_MATRIX = [
   // for a recency check.
 ];
 
+// Path C: AU spot retail constraints. Long-only, 0.10% per-side fee.
+// Daily timeframes only — spot fee drag eats higher-frequency strategies.
+const SPOT_LONG_ONLY_MATRIX = [
+  ["vwap-rsi-ema", "BTCUSDT", "1d"],
+  ["vwap-rsi-ema", "ETHUSDT", "1d"],
+  ["vwap-rsi-ema", "SOLUSDT", "1d"],
+
+  ["tsmom", "BTCUSDT", "1d"],
+  ["tsmom", "ETHUSDT", "1d"],
+  ["tsmom", "SOLUSDT", "1d"],
+
+  ["donchian-vol", "BTCUSDT", "1d"],
+  ["donchian-vol", "ETHUSDT", "1d"],
+  ["donchian-vol", "SOLUSDT", "1d"],
+
+  // Cross-sectional momentum is multi-symbol by design — represented
+  // as one cell with symbol="<universe>" and the strategy module owns the
+  // basket selection internally.
+  ["xs-momentum", "TOP-5", "1d"],
+];
+
 function passesGate(stats, stress) {
   return (
     stats.sharpe >= 1.0 &&
@@ -364,19 +419,26 @@ function passesGate(stats, stress) {
 
 async function runCompare(opts) {
   const results = [];
+  const matrix = opts.compareMode === "spot-long-only" ? SPOT_LONG_ONLY_MATRIX : COMPARE_MATRIX;
+  // Default to long-only + spot fee when spot-long-only matrix is selected
+  // (unless user explicitly overrode). Mirrors --spot flag semantics.
+  const longOnly = opts.compareMode === "spot-long-only" ? true : opts.longOnly;
+  const fee = opts.compareMode === "spot-long-only" && opts.fee === 0.0005 ? 0.001 : opts.fee;
+
   console.log("═══════════════════════════════════════════════════════════");
   console.log(`  Strategy comparison`);
+  console.log(`  Mode         : ${opts.compareMode}${longOnly ? " (long-only)" : ""}`);
   console.log(`  Months back  : ${opts.months}`);
   console.log(`  OOS reserved : ${opts.oosMonths || 0}mo`);
-  console.log(`  Per-side fee : ${(opts.fee * 100).toFixed(3)}%`);
-  console.log(`  Matrix size  : ${COMPARE_MATRIX.length} runs`);
+  console.log(`  Per-side fee : ${(fee * 100).toFixed(3)}%`);
+  console.log(`  Matrix size  : ${matrix.length} runs`);
   console.log("═══════════════════════════════════════════════════════════\n");
 
-  for (const [strategy, symbol, interval] of COMPARE_MATRIX) {
+  for (const [strategy, symbol, interval] of matrix) {
     process.stdout.write(`  ${strategy.padEnd(22)} ${symbol.padEnd(10)} ${interval.padEnd(4)} ... `);
     const t0 = Date.now();
     try {
-      const r = await runSingle({ ...opts, strategy, symbol, interval, quiet: true });
+      const r = await runSingle({ ...opts, strategy, symbol, interval, fee, longOnly, quiet: true });
       if (!r) {
         console.log("(no data)");
         continue;
