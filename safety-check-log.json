@@ -1,0 +1,181 @@
+{
+  "trades": [
+    {
+      "timestamp": "2026-05-10T11:13:17.920Z",
+      "symbol": "BTCUSDT",
+      "timeframe": "1D",
+      "price": 80864,
+      "indicators": {
+        "ema8": 80066.08134571268,
+        "vwap": 80775.3,
+        "rsi3": 100
+      },
+      "bias": "long",
+      "conditions": [
+        {
+          "label": "Price above VWAP (buyers in control)",
+          "required": "> 80775.30",
+          "actual": "80864.00",
+          "pass": true
+        },
+        {
+          "label": "Price above EMA(8) (uptrend confirmed)",
+          "required": "> 80066.08",
+          "actual": "80864.00",
+          "pass": true
+        },
+        {
+          "label": "RSI(3) below 30 (snap-back setup in uptrend)",
+          "required": "< 30",
+          "actual": "100.00",
+          "pass": false
+        },
+        {
+          "label": "Price within 1.5% of VWAP (not overextended)",
+          "required": "< 1.5%",
+          "actual": "0.11%",
+          "pass": true
+        }
+      ],
+      "allPass": false,
+      "tradeSize": 3333.3333333333335,
+      "sizing": {
+        "tradeSize": 3333.3333333333335,
+        "riskUSD": 10,
+        "stopPct": 0.3,
+        "riskPct": 1,
+        "maxLeverage": 5,
+        "cappedBy": "risk"
+      },
+      "precisionWarning": null,
+      "audRate": 1.3825,
+      "orderPlaced": false,
+      "orderId": null,
+      "paperTrading": true,
+      "testnet": true,
+      "limits": {
+        "maxTradeSizeUSD": 5000,
+        "maxTradesPerDay": 1,
+        "tradesToday": 0
+      }
+    },
+    {
+      "timestamp": "2026-05-10T11:22:41.248Z",
+      "symbol": "BTCUSDT",
+      "timeframe": "1D",
+      "price": 80785.7,
+      "indicators": {
+        "ema8": 80048.68134571268,
+        "vwap": 80749.20000000001,
+        "rsi3": 100
+      },
+      "bias": "long",
+      "conditions": [
+        {
+          "label": "Price above VWAP (buyers in control)",
+          "required": "> 80749.20",
+          "actual": "80785.70",
+          "pass": true
+        },
+        {
+          "label": "Price above EMA(8) (uptrend confirmed)",
+          "required": "> 80048.68",
+          "actual": "80785.70",
+          "pass": true
+        },
+        {
+          "label": "RSI(3) below 30 (snap-back setup in uptrend)",
+          "required": "< 30",
+          "actual": "100.00",
+          "pass": false
+        },
+        {
+          "label": "Price within 1.5% of VWAP (not overextended)",
+          "required": "< 1.5%",
+          "actual": "0.05%",
+          "pass": true
+        }
+      ],
+      "allPass": false,
+      "tradeSize": 3333.3333333333335,
+      "sizing": {
+        "tradeSize": 3333.3333333333335,
+        "riskUSD": 10,
+        "stopPct": 0.3,
+        "riskPct": 1,
+        "maxLeverage": 5,
+        "cappedBy": "risk"
+      },
+      "precisionWarning": null,
+      "audRate": 1.3825,
+      "orderPlaced": false,
+      "orderId": null,
+      "paperTrading": true,
+      "testnet": true,
+      "limits": {
+        "maxTradeSizeUSD": 5000,
+        "maxTradesPerDay": 1,
+        "tradesToday": 0
+      }
+    },
+    {
+      "timestamp": "2026-05-10T11:32:54.865Z",
+      "symbol": "BTCUSDT",
+      "timeframe": "1D",
+      "price": 80762.7,
+      "indicators": {
+        "ema8": 80043.57023460158,
+        "vwap": 80741.53333333334,
+        "rsi3": 100
+      },
+      "bias": "long",
+      "conditions": [
+        {
+          "label": "Price above VWAP (buyers in control)",
+          "required": "> 80741.53",
+          "actual": "80762.70",
+          "pass": true
+        },
+        {
+          "label": "Price above EMA(8) (uptrend confirmed)",
+          "required": "> 80043.57",
+          "actual": "80762.70",
+          "pass": true
+        },
+        {
+          "label": "RSI(3) below 30 (snap-back setup in uptrend)",
+          "required": "< 30",
+          "actual": "100.00",
+          "pass": false
+        },
+        {
+          "label": "Price within 1.5% of VWAP (not overextended)",
+          "required": "< 1.5%",
+          "actual": "0.03%",
+          "pass": true
+        }
+      ],
+      "allPass": false,
+      "tradeSize": 3333.3333333333335,
+      "sizing": {
+        "tradeSize": 3333.3333333333335,
+        "riskUSD": 10,
+        "stopPct": 0.3,
+        "riskPct": 1,
+        "maxLeverage": 5,
+        "cappedBy": "risk"
+      },
+      "precisionWarning": null,
+      "audRate": 1.3825,
+      "orderPlaced": false,
+      "orderId": null,
+      "paperTrading": true,
+      "testnet": true,
+      "limits": {
+        "maxTradeSizeUSD": 5000,
+        "maxTradesPerDay": 1,
+        "tradesToday": 0
+      }
+    }
+  ]
+}
